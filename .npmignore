@@ -1,0 +1,34 @@
+# Demo app
+example/
+App.tsx
+index.js
+app.json
+metro.config.js
+babel.config.js
+
+# Tests
+__tests__/
+coverage/
+
+# Native demo projects
+ios/
+android/
+
+# Config files (not needed in published package)
+tsconfig.json
+tsconfig.build.json
+.eslintrc.js
+.prettierrc.js
+
+# Development
+.cursor/
+agent-transcripts/
+assets/
+
+# Dependencies
+node_modules/
+package-lock.json
+
+# OS
+.DS_Store
+*.log

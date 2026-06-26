@@ -5,6 +5,13 @@ require Pod::Executable.execute_command('node', ['-p',
     {paths: [process.argv[1]]},
   )', __dir__]).strip
 
+# 使用 GitHub 镜像，避免 pod install clone 失败
+require_relative 'offline_pods'
+
+# 避免 cdn.cocoapods.org SSL 问题时，可改用 Specs 仓库（体积较大，首次较慢）
+# source 'https://github.com/CocoaPods/Specs.git'
+source 'https://cdn.cocoapods.org/'
+
 platform :ios, min_ios_version_supported
 prepare_react_native_project!
 

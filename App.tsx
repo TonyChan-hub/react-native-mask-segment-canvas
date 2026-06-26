@@ -1,130 +1,220 @@
 /**
- * Sample React Native App
- * https://github.com/facebook/react-native
+ * Mask Segment Demo App
+ * 基于 OpenCV + Skia 的掩码分区交互画布
  *
- * @format
+ * 注意：这是库开发自测用的 Demo，直接引用 ./src。
+ * 业务项目集成演示请参考 example/ 目录（使用公开包名导入）。
  */
 
-import React from 'react';
-import type {PropsWithChildren} from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
-  ScrollView,
+  ActivityIndicator,
   StatusBar,
   StyleSheet,
   Text,
-  useColorScheme,
   View,
 } from 'react-native';
+import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
+import MaskSegmentCanvas, {
+  type MaskSegmentCanvasRef,
+  type MaskSegmentSession,
+  type MaskSegmentWatchState,
+  MASK_SEMANTIC_COLORS,
+} from './src';
+import { resolveAssetPath } from './src/utils/resolveAssetPath';
+import { prewarmPngBgrCacheAsync } from './src/utils/pngImage';
 
-import {
-  Colors,
-  DebugInstructions,
-  Header,
-  LearnMoreLinks,
-  ReloadInstructions,
-} from 'react-native/Libraries/NewAppScreen';
+const TEST_ORIGIN = require('./assets/test/origin.png');
+const TEST_MASK = require('./assets/test/mask.png');
 
-type SectionProps = PropsWithChildren<{
-  title: string;
-}>;
+const INTERACTIVE_WATCH_STATES: MaskSegmentWatchState[] = [
+  'interactive',
+  'mask_paths_ready',
+];
 
-function Section({children, title}: SectionProps): React.JSX.Element {
-  const isDarkMode = useColorScheme() === 'dark';
-  return (
-    <View style={styles.sectionContainer}>
-      <Text
-        style={[
-          styles.sectionTitle,
-          {
-            color: isDarkMode ? Colors.white : Colors.black,
-          },
-        ]}>
-        {title}
-      </Text>
-      <Text
-        style={[
-          styles.sectionDescription,
-          {
-            color: isDarkMode ? Colors.light : Colors.dark,
-          },
-        ]}>
-        {children}
-      </Text>
-    </View>
-  );
+function formatWatchStatus(state: MaskSegmentWatchState | ''): string {
+  if (!state) {
+    return '';
+  }
+  if (state === 'interactive') {
+    return '可上色（轮廓加载中…）';
+  }
+  if (state === 'mask_paths_ready') {
+    return '就绪';
+  }
+  if (state === 'error') {
+    return '失败';
+  }
+  return `加载中：${state}`;
 }
 
 function App(): React.JSX.Element {
-  const isDarkMode = useColorScheme() === 'dark';
+  const canvasRef = useRef<MaskSegmentCanvasRef>(null);
+  const [testPaths, setTestPaths] = useState<{
+    origin: string;
+    mask: string;
+  } | null>(null);
+  const [loadError, setLoadError] = useState('');
+  const [watchState, setWatchState] = useState<MaskSegmentWatchState | ''>('');
+  const [sessionDraft, setSessionDraft] = useState<MaskSegmentSession | null>(
+    null,
+  );
+  const isFullyReady = watchState === 'mask_paths_ready';
+  const isInitLoading =
+    testPaths != null &&
+    watchState !== '' &&
+    !INTERACTIVE_WATCH_STATES.includes(watchState as MaskSegmentWatchState) &&
+    watchState !== 'error';
 
-  const backgroundStyle = {
-    backgroundColor: isDarkMode ? Colors.darker : Colors.lighter,
-  };
+  useEffect(() => {
+    let cancelled = false;
 
-  /*
-   * To keep the template simple and small we're adding padding to prevent view
-   * from rendering under the System UI.
-   * For bigger apps the recommendation is to use `react-native-safe-area-context`:
-   * https://github.com/AppAndFlow/react-native-safe-area-context
-   *
-   * You can read more about it here:
-   * https://github.com/react-native-community/discussions-and-proposals/discussions/827
-   */
-  const safePadding = '5%';
+    (async () => {
+      try {
+        const [origin, mask] = await Promise.all([
+          resolveAssetPath(TEST_ORIGIN, 'gym_test_origin.png'),
+          resolveAssetPath(TEST_MASK, 'gym_test_mask.png'),
+        ]);
+        await prewarmPngBgrCacheAsync([origin, mask]);
+        if (!cancelled) {
+          setTestPaths({ origin, mask });
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setLoadError(e instanceof Error ? e.message : String(e));
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   return (
-    <View style={backgroundStyle}>
-      <StatusBar
-        barStyle={isDarkMode ? 'light-content' : 'dark-content'}
-        backgroundColor={backgroundStyle.backgroundColor}
-      />
-      <ScrollView
-        style={backgroundStyle}>
-        <View style={{paddingRight: safePadding}}>
-          <Header/>
-        </View>
-        <View
-          style={{
-            backgroundColor: isDarkMode ? Colors.black : Colors.white,
-            paddingHorizontal: safePadding,
-            paddingBottom: safePadding,
-          }}>
-          <Section title="Step One">
-            Edit <Text style={styles.highlight}>App.tsx</Text> to change this
-            screen and then come back to see your edits.
-          </Section>
-          <Section title="See Your Changes">
-            <ReloadInstructions />
-          </Section>
-          <Section title="Debug">
-            <DebugInstructions />
-          </Section>
-          <Section title="Learn More">
-            Read the docs to discover what to do next:
-          </Section>
-          <LearnMoreLinks />
-        </View>
-      </ScrollView>
-    </View>
+    <SafeAreaProvider>
+      <SafeAreaView style={styles.root}>
+        <StatusBar barStyle="dark-content" backgroundColor="#fff" />
+        {loadError ? (
+          <View style={styles.center}>
+            <Text style={styles.errorText}>{loadError}</Text>
+          </View>
+        ) : testPaths ? (
+          <>
+            {watchState ? (
+              <Text style={styles.watchText}>
+                状态: {formatWatchStatus(watchState)}
+                {isFullyReady ? ' · 轮播虚线已就绪' : null}
+              </Text>
+            ) : null}
+            <View style={styles.canvasHost}>
+            <MaskSegmentCanvas
+              ref={canvasRef}
+              originUrl={testPaths.origin}
+              maskUrl={testPaths.mask}
+              semanticColors={MASK_SEMANTIC_COLORS}
+              regionOutlineColor="rgba(20, 120, 235, 0.58)"
+              showDebugPickers
+              initialSession={sessionDraft ?? undefined}
+              onWatch={(state, durationMs, detail) => {
+                setWatchState(state);
+                if (__DEV__) {
+                  const extra =
+                    detail && Object.keys(detail).length > 0
+                      ? ` ${JSON.stringify(detail)}`
+                      : '';
+                  console.log(
+                    `[Demo onWatch] ${state} ${durationMs.toFixed(0)}ms${extra}`,
+                  );
+                }
+              }}
+              onPaintCallback={payload => {
+                if (__DEV__) {
+                  if (payload.kind === 'brush_required') {
+                    console.log('[Demo onPaint]', payload.hint, payload.regionName);
+                  } else {
+                    console.log('[Demo onPaint]', payload.regionName, payload.color);
+                  }
+                }
+              }}
+              onError={message => {
+                setLoadError(message);
+                setWatchState('error');
+              }}
+            />
+            {isInitLoading ? (
+              <View style={styles.initOverlay} pointerEvents="none">
+                <ActivityIndicator size="small" color="#333" />
+                <Text style={styles.initOverlayText}>
+                  {formatWatchStatus(watchState)}
+                </Text>
+              </View>
+            ) : null}
+            </View>
+            {sessionDraft ? (
+              <Text style={styles.sessionText}>
+                已恢复 MMKV 草稿（{sessionDraft.painted.length} 区域）
+              </Text>
+            ) : null}
+          </>
+        ) : (
+          <View style={styles.center}>
+            <ActivityIndicator size="large" color="#333" />
+            <Text style={styles.loadingText}>加载健身房测试图…</Text>
+          </View>
+        )}
+      </SafeAreaView>
+    </SafeAreaProvider>
   );
 }
 
 const styles = StyleSheet.create({
-  sectionContainer: {
-    marginTop: 32,
-    paddingHorizontal: 24,
+  root: {
+    flex: 1,
+    backgroundColor: '#fff',
   },
-  sectionTitle: {
-    fontSize: 24,
-    fontWeight: '600',
+  center: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 24,
   },
-  sectionDescription: {
-    marginTop: 8,
-    fontSize: 18,
-    fontWeight: '400',
+  loadingText: {
+    marginTop: 12,
+    color: '#666',
+    fontSize: 14,
   },
-  highlight: {
-    fontWeight: '700',
+  errorText: {
+    color: '#c33',
+    fontSize: 14,
+    textAlign: 'center',
+  },
+  watchText: {
+    paddingHorizontal: 12,
+    paddingTop: 8,
+    color: '#555',
+    fontSize: 12,
+  },
+  canvasHost: {
+    flex: 1,
+    position: 'relative',
+  },
+  initOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.72)',
+    gap: 8,
+  },
+  initOverlayText: {
+    color: '#666',
+    fontSize: 13,
+  },
+  sessionText: {
+    paddingHorizontal: 12,
+    paddingBottom: 8,
+    color: '#2a7',
+    fontSize: 12,
   },
 });
 
