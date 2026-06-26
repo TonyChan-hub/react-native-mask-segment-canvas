@@ -1,0 +1,122 @@
+diff --git a/node_modules/react-native-fast-opencv/cpp/ConvertImage.cpp b/node_modules/react-native-fast-opencv/cpp/ConvertImage.cpp
+index ea50bc0..729d648 100644
+--- a/node_modules/react-native-fast-opencv/cpp/ConvertImage.cpp
++++ b/node_modules/react-native-fast-opencv/cpp/ConvertImage.cpp
+@@ -149,6 +149,39 @@ string ImageConverter::mat2str(const Mat& m, std::string &format)
+ 
+ }
+ 
++Mat ImageConverter::ensure8U(const Mat& img)
++{
++    if (img.empty() || img.depth() == CV_8U) {
++        return img;
++    }
++
++    // Semantic mask PNG: 16-bit RGB stores 8-bit labels as value×257.
++    if (img.depth() == CV_16U && img.channels() >= 3) {
++        cv::Mat img8;
++        if (img.channels() == 4) {
++            cv::Mat bgr16;
++            cv::cvtColor(img, bgr16, cv::COLOR_BGRA2BGR);
++            bgr16.convertTo(img8, CV_8U, 1.0 / 257.0);
++        } else {
++            img.convertTo(img8, CV_8U, 1.0 / 257.0);
++        }
++        return img8;
++    }
++
++    Mat dst;
++    const int outType = CV_MAKETYPE(CV_8U, img.channels());
++    double alpha = 1.0;
++
++    if (img.depth() == CV_16U || img.depth() == CV_16S) {
++        alpha = 255.0 / 65535.0;
++    } else if (img.depth() == CV_32F || img.depth() == CV_64F) {
++        alpha = 255.0;
++    }
++
++    img.convertTo(dst, outType, alpha);
++    return dst;
++}
++
+ Mat ImageConverter::str2mat(const string& s)
+ {
+     // Decode data
+@@ -157,5 +190,5 @@ Mat ImageConverter::str2mat(const string& s)
+ 
+     cv::Mat img = cv::imdecode(data, IMREAD_UNCHANGED);
+   
+-    return img;
++    return ensure8U(img);
+ }
+diff --git a/node_modules/react-native-fast-opencv/cpp/ConvertImage.hpp b/node_modules/react-native-fast-opencv/cpp/ConvertImage.hpp
+index 79df697..9bd84f2 100644
+--- a/node_modules/react-native-fast-opencv/cpp/ConvertImage.hpp
++++ b/node_modules/react-native-fast-opencv/cpp/ConvertImage.hpp
+@@ -23,6 +23,8 @@ class ImageConverter {
+ public:
+     static cv::Mat str2mat(const string& imageBase64);
+     static string mat2str(const Mat& img, std::string &format);
++    /** 16-bit / float PNG 等非常规 depth 统一缩放到 8-bit，避免 matToBuffer(uint8) 误读 */
++    static cv::Mat ensure8U(const Mat& img);
+ 
+ private:
+     static std::string base64_encode(uchar const* bytesToEncode, unsigned int inLen);
+diff --git a/node_modules/react-native-fast-opencv/cpp/FOCV_Object.cpp b/node_modules/react-native-fast-opencv/cpp/FOCV_Object.cpp
+index e83166d..5d3268e 100644
+--- a/node_modules/react-native-fast-opencv/cpp/FOCV_Object.cpp
++++ b/node_modules/react-native-fast-opencv/cpp/FOCV_Object.cpp
+@@ -183,20 +183,20 @@ jsi::Object FOCV_Object::convertToJSI(jsi::Runtime& runtime, const jsi::Value* a
+ 
+     switch(hashString(objectType.c_str(), objectType.size())) {
+         case hashString("mat", 3): {
+-            auto mat = *FOCV_Storage::get<cv::Mat>(id);
++            const cv::Mat& stored = *FOCV_Storage::get<cv::Mat>(id);
+             std::string format = "jpeg";
+           
+             if(arguments[1].isString()) {
+               format = arguments[1].asString(runtime).utf8(runtime);
+             }
+ 
+-            mat.convertTo(mat, CV_8U);
++            const cv::Mat exportMat = ImageConverter::ensure8U(stored);
+           
+-            value.setProperty(runtime, "base64", jsi::String::createFromUtf8(runtime, ImageConverter::mat2str(mat, format)));
+-            value.setProperty(runtime, "size", jsi::Value(mat.size));
+-            value.setProperty(runtime, "cols", jsi::Value(mat.cols));
+-            value.setProperty(runtime, "rows", jsi::Value(mat.rows));
+-            value.setProperty(runtime, "type", jsi::Value(mat.type()));
++            value.setProperty(runtime, "base64", jsi::String::createFromUtf8(runtime, ImageConverter::mat2str(exportMat, format)));
++            value.setProperty(runtime, "size", jsi::Value(stored.size));
++            value.setProperty(runtime, "cols", jsi::Value(stored.cols));
++            value.setProperty(runtime, "rows", jsi::Value(stored.rows));
++            value.setProperty(runtime, "type", jsi::Value(stored.type()));
+         } break;
+         case hashString("mat_vector", 10): {
+             auto mats = *FOCV_Storage::get<std::vector<cv::Mat>>(id);
+diff --git a/node_modules/react-native-fast-opencv/cpp/react-native-fast-opencv.cpp b/node_modules/react-native-fast-opencv/cpp/react-native-fast-opencv.cpp
+index f0186e5..1289d57 100644
+--- a/node_modules/react-native-fast-opencv/cpp/react-native-fast-opencv.cpp
++++ b/node_modules/react-native-fast-opencv/cpp/react-native-fast-opencv.cpp
+@@ -160,7 +160,8 @@ jsi::Value OpenCVPlugin::get(jsi::Runtime& runtime, const jsi::PropNameID& propN
+               size_t count) -> jsi::Object {
+ 
+                 auto id = FOCV_JsiObject::id_from_wrap(runtime, arguments[0]);
+-                auto mat = *FOCV_Storage::get<cv::Mat>(id);
++                const cv::Mat& stored = *FOCV_Storage::get<cv::Mat>(id);
++                cv::Mat mat = stored.isContinuous() ? stored : stored.clone();
+ 
+                 jsi::Object value(runtime);
+ 
+@@ -169,6 +170,11 @@ jsi::Value OpenCVPlugin::get(jsi::Runtime& runtime, const jsi::PropNameID& propN
+                 value.setProperty(runtime, "channels", jsi::Value(mat.channels()));
+ 
+                 auto type = arguments[1].asString(runtime).utf8(runtime);
++
++                if(type == "uint8" && mat.depth() != CV_8U) {
++                  mat = ImageConverter::ensure8U(mat);
++                }
++
+                 auto size = mat.cols * mat.rows * mat.channels();
+ 
+                 if(type == "uint8") {
