@@ -6,6 +6,7 @@ import { runOnJS } from 'react-native-reanimated';
 import { launchImageLibrary } from 'react-native-image-picker';
 import cv from '../utils/opencvAdapter';
 import { buildAllRegionOutlinePaths, buildRegionOutlinePathForRegion, downsampleMaskDataForPaths, extractRegionsFromMaskBufferSync, isBaseboardMaskPixel, upscaleBinaryMask, } from '../utils/maskSegmentation';
+import { splitWallRegionsByTexture } from '../utils/wallTextureSplit';
 import { clearDerivedImageCache, readPngBgrBuffer, prewarmPngBgrCache, resizeBgrBuffer, } from '../utils/pngImage';
 import { hashUrl, resolveImageUrl } from '../utils/resolveImageUrl';
 import { compositePaintedImage } from '../utils/compositePaintedImage';
@@ -827,12 +828,16 @@ const MaskSegmentCanvas = forwardRef(function MaskSegmentCanvas(props, ref) {
                     rows: imgH,
                 };
             });
-            const [segmentResult] = await Promise.all([
+            const [segmentResultRaw, workScaled] = await Promise.all([
                 segmentTask,
                 workScaledTask,
             ]);
             if (isCancelled()) {
                 return;
+            }
+            let segmentResult = segmentResultRaw;
+            if (getMaskSegmentRuntimeConfig().mask.splitWalls) {
+                segmentResult = splitWallRegionsByTexture(segmentResult, workScaled.buffer, segW, segH, minArea);
             }
             const paintPromise = paintLayersPromiseRef.current ?? Promise.resolve();
             emitWatch('mask_sampled', { regionCount: segmentResult.regions.length });
@@ -852,6 +857,7 @@ const MaskSegmentCanvas = forwardRef(function MaskSegmentCanvas(props, ref) {
                 baseboardBinary: segmentResult.baseboardBinary,
                 cols: segmentResult.segCols,
                 rows: segmentResult.segRows,
+                wallSubLabels: segmentResult.wallSubLabels,
             };
             baseboardPickMaskRef.current = null;
             kickRegionIdRef.current =

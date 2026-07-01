@@ -499,6 +499,14 @@ const hasError = watchState === 'error';
 | `baseboardJunctionRowMarginPx` | `number` | `1` | 踢脚线交界行边距 |
 | `baseboardJunctionVReachPx` | `number` | `2` | 踢脚线交界纵向延伸 |
 | `baseboardMinRunPx` | `number` | `2` | 蒙版条带最小 run 长度 |
+| `splitWalls` | `boolean` | `false` | 在 wall 掩码内按纹理边界细分为 `wall-1`、`wall-2`… |
+| `splitWallsMaxCount` | `number` | `8` | 墙壁子区最大数量 |
+| `splitWallsMinAreaRatio` | `number` | `0.002` | 碎块最小面积比（相对 seg 总像素） |
+| `splitWallsColorDistSq` | `number` | `1400` | 连通域色度均值距离平方阈值（墙内光影容忍，材质间更严） |
+| `splitWallsChromaBlurRadius` | `number` | `5` | 预留：色度平滑半径 |
+| `splitWallsNeutralChromaMax` | `number` | `14` | 白/灰墙低饱和判定半径；与有色墙强制分界 |
+
+开启 `splitWalls` 后，原有单一 `wall` 区域会被替换为多个 `wall-N` 子区，各自独立上色与撤销。旧 Session 中 `regionName: 'wall'` 无法映射到新子区名，需重新上色。
 
 ### pipelineConfig
 

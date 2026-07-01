@@ -28,8 +28,10 @@ import {
   extractRegionsFromMaskBufferSync,
   isBaseboardMaskPixel,
   upscaleBinaryMask,
+  type RegionMaskData,
   type SegmentRegion,
 } from '../utils/maskSegmentation';
+import { splitWallRegionsByTexture } from '../utils/wallTextureSplit';
 import {
   clearDerivedImageCache,
   readPngBgrBuffer,
@@ -809,12 +811,7 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
     cols: number;
     rows: number;
   } | null>(null);
-  const regionMaskDataRef = useRef<{
-    labels: Uint8Array;
-    baseboardBinary: Uint8Array;
-    cols: number;
-    rows: number;
-  } | null>(null);
+  const regionMaskDataRef = useRef<RegionMaskData | null>(null);
   const workBufferRef = useRef<WorkScaledBgr | null>(null);
   const paintLayersPromiseRef = useRef<Promise<void> | null>(null);
   const loadPaintLayersRef = useRef<() => Promise<void>>(() => Promise.resolve());
@@ -1216,12 +1213,23 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
           };
         });
 
-        const [segmentResult] = await Promise.all([
+        const [segmentResultRaw, workScaled] = await Promise.all([
           segmentTask,
           workScaledTask,
         ]);
         if (isCancelled()) {
           return;
+        }
+
+        let segmentResult = segmentResultRaw;
+        if (getMaskSegmentRuntimeConfig().mask.splitWalls) {
+          segmentResult = splitWallRegionsByTexture(
+            segmentResult,
+            workScaled.buffer,
+            segW,
+            segH,
+            minArea,
+          );
         }
         const paintPromise =
           paintLayersPromiseRef.current ?? Promise.resolve();
@@ -1246,6 +1254,7 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
           baseboardBinary: segmentResult.baseboardBinary,
           cols: segmentResult.segCols,
           rows: segmentResult.segRows,
+          wallSubLabels: segmentResult.wallSubLabels,
         };
         baseboardPickMaskRef.current = null;
         kickRegionIdRef.current =

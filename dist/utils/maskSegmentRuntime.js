@@ -91,6 +91,12 @@ export const DEFAULT_MASK_CONFIG = {
     baseboardJunctionRowMarginPx: 1,
     baseboardJunctionVReachPx: 2,
     baseboardMinRunPx: 2,
+    splitWalls: false,
+    splitWallsMaxCount: 8,
+    splitWallsMinAreaRatio: 0.002,
+    splitWallsColorDistSq: 1400,
+    splitWallsChromaBlurRadius: 5,
+    splitWallsNeutralChromaMax: 14,
 };
 function toStringSet(values) {
     return new Set(values ?? []);
@@ -127,6 +133,16 @@ export function mergeMaskConfig(partial) {
         baseboardJunctionVReachPx: partial.baseboardJunctionVReachPx ??
             DEFAULT_MASK_CONFIG.baseboardJunctionVReachPx,
         baseboardMinRunPx: partial.baseboardMinRunPx ?? DEFAULT_MASK_CONFIG.baseboardMinRunPx,
+        splitWalls: partial.splitWalls ?? DEFAULT_MASK_CONFIG.splitWalls,
+        splitWallsMaxCount: partial.splitWallsMaxCount ?? DEFAULT_MASK_CONFIG.splitWallsMaxCount,
+        splitWallsMinAreaRatio: partial.splitWallsMinAreaRatio ??
+            DEFAULT_MASK_CONFIG.splitWallsMinAreaRatio,
+        splitWallsColorDistSq: partial.splitWallsColorDistSq ??
+            DEFAULT_MASK_CONFIG.splitWallsColorDistSq,
+        splitWallsChromaBlurRadius: partial.splitWallsChromaBlurRadius ??
+            DEFAULT_MASK_CONFIG.splitWallsChromaBlurRadius,
+        splitWallsNeutralChromaMax: partial.splitWallsNeutralChromaMax ??
+            DEFAULT_MASK_CONFIG.splitWallsNeutralChromaMax,
     };
 }
 export function createRuntimeConfig(input) {

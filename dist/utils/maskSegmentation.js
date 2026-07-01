@@ -374,17 +374,23 @@ export function buildRegionOutlinePathForRegion(regionId, regions, maskData, rec
     return buildRegionOutlinePathFromBinary(binary, cols, rows, rect, seedPx);
 }
 function extractRegionBinaries(regions, maskData) {
-    const { labels, baseboardBinary, cols, rows } = maskData;
+    const { labels, baseboardBinary, cols, rows, wallSubLabels } = maskData;
     const size = cols * rows;
     const binaries = new Map();
     const semanticColors = getMaskSegmentRuntimeConfig().mask.semanticColors;
     const regionIdBySemantic = new Int32Array(semanticColors.length);
     regionIdBySemantic.fill(-1);
+    const wallSubRegionIds = new Map();
     let baseboardRegionId = null;
     for (const reg of regions) {
         binaries.set(reg.id, new Uint8Array(size));
         if (reg.thinStrip) {
             baseboardRegionId = reg.id;
+            continue;
+        }
+        const wallMatch = /^wall-(\d+)$/.exec(reg.name);
+        if (wallMatch && wallSubLabels) {
+            wallSubRegionIds.set(Number(wallMatch[1]) - 1, reg.id);
             continue;
         }
         const semanticIndex = semanticColors.findIndex(entry => entry.name === reg.name);
@@ -393,9 +399,20 @@ function extractRegionBinaries(regions, maskData) {
         }
     }
     const semanticCount = semanticColors.length;
+    const wallIdx = semanticColors.findIndex(entry => entry.name === 'wall');
     for (let i = 0; i < size; i++) {
         if (baseboardRegionId != null && baseboardBinary[i] > 0) {
             binaries.get(baseboardRegionId)[i] = 255;
+            continue;
+        }
+        if (wallSubLabels && wallIdx >= 0 && labels[i] === wallIdx) {
+            const subIdx = wallSubLabels[i];
+            if (subIdx !== 255) {
+                const regionId = wallSubRegionIds.get(subIdx);
+                if (regionId !== undefined) {
+                    binaries.get(regionId)[i] = 255;
+                }
+            }
             continue;
         }
         const semanticIndex = labels[i];
@@ -667,7 +684,7 @@ function appendRunRectToBuilder(runStart, runEnd, y, cols, rows, rect, builder, 
 }
 /** 蒙版路径构建降采样（屏幕显示不需要分割分辨率，点击仍用全分辨率 pickMap） */
 export function downsampleMaskDataForPaths(maskData, maxLongSide) {
-    const { labels, baseboardBinary, cols, rows } = maskData;
+    const { labels, baseboardBinary, cols, rows, wallSubLabels } = maskData;
     const longSide = Math.max(cols, rows);
     if (longSide <= maxLongSide) {
         return maskData;
@@ -677,6 +694,10 @@ export function downsampleMaskDataForPaths(maskData, maxLongSide) {
     const dstRows = Math.max(1, Math.floor(rows * scale));
     const outLabels = new Uint8Array(dstCols * dstRows);
     const outBaseboard = new Uint8Array(dstCols * dstRows);
+    const outWallSub = wallSubLabels != null ? new Uint8Array(dstCols * dstRows) : undefined;
+    if (outWallSub) {
+        outWallSub.fill(255);
+    }
     for (let y = 0; y < dstRows; y++) {
         const sy = Math.min(rows - 1, Math.floor((y * rows) / dstRows));
         const srcRow = sy * cols;
@@ -687,6 +708,9 @@ export function downsampleMaskDataForPaths(maskData, maxLongSide) {
             const di = dstRow + x;
             outLabels[di] = labels[si];
             outBaseboard[di] = baseboardBinary[si];
+            if (outWallSub && wallSubLabels) {
+                outWallSub[di] = wallSubLabels[si];
+            }
         }
     }
     return {
@@ -694,6 +718,7 @@ export function downsampleMaskDataForPaths(maskData, maxLongSide) {
         baseboardBinary: outBaseboard,
         cols: dstCols,
         rows: dstRows,
+        wallSubLabels: outWallSub,
     };
 }
 /** 单次扫描构建所有分区 Skia 蒙版路径（单 label pass，避免每像素 × 语义数循环） */

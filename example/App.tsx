@@ -121,6 +121,7 @@ function App(): React.JSX.Element {
 
   // Demo 模式
   const [useCustomColors, setUseCustomColors] = useState(false);
+  const [splitWalls, setSplitWalls] = useState(false);
   const [pipelinePreset, setPipelinePreset] = useState<PipelinePreset>('medium');
   const [groupIndex, setGroupIndex] = useState(0);
 
@@ -371,13 +372,22 @@ function App(): React.JSX.Element {
               </Text>
             </TouchableOpacity>
           ))}
+          <Text style={styles.modeDivider}>|</Text>
+          <TouchableOpacity
+            style={[styles.modeChip, splitWalls && styles.modeChipActive]}
+            onPress={() => setSplitWalls(v => !v)}
+          >
+            <Text style={[styles.modeChipText, splitWalls && styles.modeChipTextActive]}>
+              墙壁细分
+            </Text>
+          </TouchableOpacity>
         </ScrollView>
       </View>
 
       {/* 画布 */}
       <View style={styles.canvasHost}>
         <MaskSegmentCanvas
-          key={`image-group-${groupIndex}`}
+          key={`image-group-${groupIndex}-split-${splitWalls ? 1 : 0}`}
           ref={canvasRef}
           style={styles.canvas}
           originUrl={imagePaths.origin}
@@ -388,6 +398,7 @@ function App(): React.JSX.Element {
           maskConfig={{
             ...DEFAULT_MASK_CONFIG,
             maxRegionColors: 6,
+            splitWalls,
           }}
           paintConfig={{
             ...DEFAULT_PAINT_CONFIG,

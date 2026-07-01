@@ -15,6 +15,15 @@ export type PaintResourceBatch = {
 
 /** OpenCV 8-bit Lab L 通道（BGR 输入，供单测与近似对照） */
 export function bgrToLabL(b: number, g: number, r: number): number {
+  return bgrToLab(b, g, r).l;
+}
+
+/** BGR → 8-bit Lab（L/a/b 均映射到 0–255） */
+export function bgrToLab(
+  b: number,
+  g: number,
+  r: number,
+): { l: number; a: number; b: number } {
   let rf = r / 255;
   let gf = g / 255;
   let bf = b / 255;
@@ -40,7 +49,14 @@ export function bgrToLabL(b: number, g: number, r: number): number {
   fz = fz > delta3 ? Math.cbrt(fz) : fz / (3 * delta * delta) + 4 / 29;
 
   const L = fy * 116 - 16;
-  return Math.max(0, Math.min(255, Math.round((L * 255) / 100)));
+  const a = 500 * (fx - fy);
+  const bLab = 200 * (fy - fz);
+
+  return {
+    l: Math.max(0, Math.min(255, Math.round((L * 255) / 100))),
+    a: Math.max(0, Math.min(255, Math.round(a + 128))),
+    b: Math.max(0, Math.min(255, Math.round(bLab + 128))),
+  };
 }
 
 export function bgrBufferToRgbaBuffer(
