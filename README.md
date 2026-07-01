@@ -112,7 +112,6 @@ import '@shopify/react-native-skia';
 - 重启 Metro (`--reset-cache`) + 重装 app
 
 详细清单和模板见 `example/README.md` 的「运行时出现类似错误」一节。
-
 ### 业务侧引入
 
 ```tsx

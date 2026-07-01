@@ -114,6 +114,7 @@ function App(): React.JSX.Element {
               maskUrl={testPaths.mask}
               semanticColors={MASK_SEMANTIC_COLORS}
               regionOutlineColor="rgba(20, 120, 235, 0.58)"
+              showDebugPickers
               initialSession={sessionDraft ?? undefined}
               onWatch={(state, durationMs, detail) => {
                 setWatchState(state);
