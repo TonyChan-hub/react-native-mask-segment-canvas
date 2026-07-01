@@ -55,21 +55,8 @@ export type SegmentRegion = {
     thinStrip?: boolean;
 };
 export declare function buildRegionOutlinePolygons(reg: SegmentRegion): NormPoint[][];
-export declare function buildRegionOutlinePathForRegion(regionId: number, regions: SegmentRegion[], maskData: RegionMaskData, rect: {
-    x: number;
-    y: number;
-    w: number;
-    h: number;
-}, normSeed?: {
-    x: number;
-    y: number;
-}): SkPath;
-export declare function buildAllRegionOutlinePaths(regions: SegmentRegion[], maskData: RegionMaskData, rect: {
-    x: number;
-    y: number;
-    w: number;
-    h: number;
-}): Map<number, SkPath>;
+import { buildAllRegionOutlinePaths, buildRegionOutlinePathForRegion } from './maskOutlinePaths';
+export { buildAllRegionOutlinePaths, buildRegionOutlinePathForRegion };
 /** 从二值图逐行条带构建蒙版（供 Skia PathBuilder 使用） */
 export declare function appendMaskBinaryToPathBuilder(binary: Uint8Array, cols: number, rows: number, rect: {
     x: number;

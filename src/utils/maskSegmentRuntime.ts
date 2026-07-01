@@ -51,7 +51,7 @@ export const PIPELINE_PRESETS: Record<PipelinePreset, Required<PipelineConfig>> 
   low: PIPELINE_LOW,
 };
 
-export const DEFAULT_PIPELINE_CONFIG: Required<PipelineConfig> = PIPELINE_HIGH;
+export const DEFAULT_PIPELINE_CONFIG: Required<PipelineConfig> = PIPELINE_MEDIUM;
 
 export function resolvePipelineConfig(
   preset?: PipelinePreset,

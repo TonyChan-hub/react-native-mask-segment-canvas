@@ -34,7 +34,7 @@ export const PIPELINE_PRESETS = {
     medium: PIPELINE_MEDIUM,
     low: PIPELINE_LOW,
 };
-export const DEFAULT_PIPELINE_CONFIG = PIPELINE_HIGH;
+export const DEFAULT_PIPELINE_CONFIG = PIPELINE_MEDIUM;
 export function resolvePipelineConfig(preset, overrides) {
     const base = preset != null ? PIPELINE_PRESETS[preset] : DEFAULT_PIPELINE_CONFIG;
     return { ...base, ...overrides };
