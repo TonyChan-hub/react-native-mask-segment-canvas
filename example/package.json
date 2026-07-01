@@ -1,0 +1,36 @@
+{
+  "name": "mask-segment-canvas-example",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "postinstall": "patch-package",
+    "start": "react-native start",
+    "ios": "react-native run-ios",
+    "android": "react-native run-android",
+    "pod:install": "cd ios && pod install"
+  },
+  "dependencies": {
+    "react": "19.0.0",
+    "react-native": "0.79.4",
+    "react-native-mask-segment-canvas": "file:..",
+    "@shopify/react-native-skia": "^2.6.4",
+    "react-native-fast-opencv": "^0.4.8",
+    "react-native-fs": "^2.20.0",
+    "react-native-gesture-handler": "^2.16.0",
+    "react-native-image-picker": "^8.2.1",
+    "react-native-reanimated": "^3.19.5",
+    "react-native-safe-area-context": "^5.8.0",
+    "buffer": "^6.0.3"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.25.2",
+    "@babel/preset-env": "^7.25.3",
+    "@babel/runtime": "^7.25.0",
+    "@react-native/babel-preset": "0.79.4",
+    "@react-native/metro-config": "0.79.4",
+    "@react-native/typescript-config": "0.79.4",
+    "@types/react": "^19.0.0",
+    "patch-package": "^8.0.1",
+    "typescript": "5.0.4"
+  }
+}

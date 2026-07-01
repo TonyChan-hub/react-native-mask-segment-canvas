@@ -1,6 +1,6 @@
 {
   "name": "react-native-mask-segment-canvas",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "React Native 掩码分区交互库：OpenCV 语义分割 + SkSL Shader 上色",
   "main": "dist/index.js",
   "module": "dist/index.js",

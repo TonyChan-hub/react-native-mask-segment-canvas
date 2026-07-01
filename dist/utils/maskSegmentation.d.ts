@@ -12,6 +12,8 @@ export type SegmentMaskResult = {
     baseboardBinary: Uint8Array;
     segCols: number;
     segRows: number;
+    /** splitWalls 时：墙像素 → 子区索引 0..N-1，非墙为 WALL_SUB_LABEL_NONE */
+    wallSubLabels?: Uint8Array;
 };
 export type SegmentRegion = {
     id: number;
@@ -95,6 +97,7 @@ export type RegionMaskData = {
     baseboardBinary: Uint8Array;
     cols: number;
     rows: number;
+    wallSubLabels?: Uint8Array;
 };
 /** 蒙版路径构建降采样（屏幕显示不需要分割分辨率，点击仍用全分辨率 pickMap） */
 export declare function downsampleMaskDataForPaths(maskData: RegionMaskData, maxLongSide: number): RegionMaskData;

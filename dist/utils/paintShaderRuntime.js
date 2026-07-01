@@ -1,5 +1,5 @@
 import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
-import { Skia, Fill, Shader, ImageShader, Group, drawAsImage, } from '@shopify/react-native-skia';
+import { Skia, Shader, ImageShader, Group, Rect, drawAsImage, } from '@shopify/react-native-skia';
 import { REGION_PAINT_SKSL } from '../shaders/regionPaint.sksl';
 import { getMaskSegmentRuntimeConfig } from './maskSegmentRuntime';
 import { buildPaintColorMapImage } from './paintColorMapTexture';
@@ -34,7 +34,7 @@ function createPaintShaderTree(props) {
         ty: 'clamp',
         rect: { x, y, width, height },
     };
-    return (_jsx(Fill, { children: _jsxs(Shader, { source: effect, uniforms: uniforms, children: [_jsx(ImageShader, { image: originImage, ...imageShaderProps }), _jsx(ImageShader, { image: paintColorMap, ...imageShaderProps }), _jsx(ImageShader, { image: lowFreqImage, ...imageShaderProps }), _jsx(ImageShader, { image: highFreqImage, ...imageShaderProps })] }) }));
+    return (_jsx(Rect, { x: x, y: y, width: width, height: height, children: _jsxs(Shader, { source: effect, uniforms: uniforms, children: [_jsx(ImageShader, { image: originImage, ...imageShaderProps }), _jsx(ImageShader, { image: paintColorMap, ...imageShaderProps }), _jsx(ImageShader, { image: lowFreqImage, ...imageShaderProps }), _jsx(ImageShader, { image: highFreqImage, ...imageShaderProps })] }) }));
 }
 /** Canvas 内全屏上色 Shader 层 */
 export function PaintShaderLayer(props) {

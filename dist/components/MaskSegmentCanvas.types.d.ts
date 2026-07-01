@@ -1,5 +1,4 @@
-import type { ReactNode } from 'react';
-import type { StyleProp, TextStyle, ViewStyle } from 'react-native';
+import type { StyleProp, ViewStyle } from 'react-native';
 import type { SegmentRegion } from '../utils/maskSegmentation';
 import type { MaskSemanticColor } from '../utils/maskSemanticPalette';
 export type BgrColor = {
@@ -42,6 +41,18 @@ export type MaskSegmentConfig = {
     baseboardJunctionRowMarginPx?: number;
     baseboardJunctionVReachPx?: number;
     baseboardMinRunPx?: number;
+    /** 在 wall 掩码内按纹理边界细分为 wall-1、wall-2… */
+    splitWalls?: boolean;
+    /** 墙壁子区最大数量 */
+    splitWallsMaxCount?: number;
+    /** 碎块最小面积比（相对 seg 总像素） */
+    splitWallsMinAreaRatio?: number;
+    /** Lab 色度 + 高频纹理特征距离平方阈值（不含亮度，削弱光影影响） */
+    splitWallsColorDistSq?: number;
+    /** 色度平滑半径（像素），仅用于纹理能量计算 */
+    splitWallsChromaBlurRadius?: number;
+    /** 低饱和（白/灰墙）判定半径，用于与有色墙强制分界 */
+    splitWallsNeutralChromaMax?: number;
 };
 export type PaintConfig = {
     palette?: BgrColor[];
@@ -106,11 +117,6 @@ export type PaintBrushRequiredPayload = {
     regionName: string;
 };
 export type PaintCallbackPayload = PaintSuccessPayload | PaintBrushRequiredPayload;
-export type OverlayButtonRenderProps = {
-    onPress: () => void;
-    disabled?: boolean;
-    text: string;
-};
 export type MaskSegmentCanvasRef = {
     reset: () => void;
     swap: (showOrigin?: boolean) => void;
@@ -148,30 +154,14 @@ export type MaskSegmentCanvasProps = {
     initialSession?: MaskSegmentSession;
     initialPaintColor?: BgrColor;
     initialPaintConfigJson?: Record<string, unknown>;
-    showDebugPickers?: boolean;
-    showToolbar?: boolean;
-    showColorBar?: boolean;
-    showStatusRow?: boolean;
-    showOverlayButtons?: boolean;
     disabled?: boolean;
     style?: StyleProp<ViewStyle>;
-    canvasStyle?: StyleProp<ViewStyle>;
     /**
      * Max container height available for this component (px). When set, the SDK
      * computes canvas dimensions as a fit-contain within (screenWidth - 20, maxHeight)
-     * instead of using the full image aspect at full screen width.  This prevents
-     * internal ScrollView scrolling for tall images.
+     * instead of using the full image aspect at full screen width.
      */
     maxHeight?: number;
-    undoButtonStyle?: StyleProp<ViewStyle>;
-    compareButtonStyle?: StyleProp<ViewStyle>;
-    undoButtonTextStyle?: StyleProp<TextStyle>;
-    compareButtonTextStyle?: StyleProp<TextStyle>;
-    undoButtonText?: string;
-    compareButtonText?: string;
-    compareExitButtonText?: string;
-    renderUndoButton?: (props: OverlayButtonRenderProps) => ReactNode;
-    renderCompareButton?: (props: OverlayButtonRenderProps) => ReactNode;
     onWatch?: (state: MaskSegmentWatchState, durationMs: number, detail?: MaskSegmentWatchDetail) => void;
     onPaintCallback?: (payload: PaintCallbackPayload) => void;
     onError?: (message: string, error?: unknown) => void;

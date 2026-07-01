@@ -24,6 +24,13 @@ function buildSemanticRgb(colors) {
         },
     }));
 }
+function getDefaultSemanticEntry(name) {
+    const color = MASK_SEMANTIC_COLORS.find(c => c.name === name);
+    return {
+        name: color.name,
+        rgb: { r: color.bgr.r, g: color.bgr.g, b: color.bgr.b },
+    };
+}
 function getSemanticContext() {
     const revision = getMaskRuntimeRevision();
     if (contextRevision === revision && cachedContext) {
@@ -31,9 +38,11 @@ function getSemanticContext() {
     }
     const mask = getMaskSegmentRuntimeConfig().mask;
     const semanticRgb = buildSemanticRgb(mask.semanticColors);
-    const baseboardRgb = semanticRgb.find(entry => entry.name === BASEBOARD_SEMANTIC_NAME);
-    const cabinetRgb = semanticRgb.find(entry => entry.name === 'cabinet');
-    const wallRgb = semanticRgb.find(entry => entry.name === 'wall');
+    const baseboardRgb = semanticRgb.find(entry => entry.name === BASEBOARD_SEMANTIC_NAME) ?? getDefaultSemanticEntry(BASEBOARD_SEMANTIC_NAME);
+    const cabinetRgb = semanticRgb.find(entry => entry.name === 'cabinet') ??
+        getDefaultSemanticEntry('cabinet');
+    const wallRgb = semanticRgb.find(entry => entry.name === 'wall') ??
+        getDefaultSemanticEntry('wall');
     const maxDist = mask.baseboardMaxColorDist;
     cachedContext = {
         baseboardMaxColorDistSq: maxDist * maxDist,
@@ -75,7 +84,7 @@ export function classifyBgrPixelToSemantic(b, g, r) {
             best = entry;
         }
     }
-    return best.name;
+    return best?.name ?? 'wall';
 }
 export function getSemanticColorByName(name) {
     const colors = getMaskSegmentRuntimeConfig().mask.semanticColors;

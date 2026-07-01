@@ -2,6 +2,10 @@ import cv from './opencvAdapter';
 import { getMaskSegmentRuntimeConfig } from './maskSegmentRuntime';
 /** OpenCV 8-bit Lab L 通道（BGR 输入，供单测与近似对照） */
 export function bgrToLabL(b, g, r) {
+    return bgrToLab(b, g, r).l;
+}
+/** BGR → 8-bit Lab（L/a/b 均映射到 0–255） */
+export function bgrToLab(b, g, r) {
     let rf = r / 255;
     let gf = g / 255;
     let bf = b / 255;
@@ -23,7 +27,13 @@ export function bgrToLabL(b, g, r) {
     fy = fy > delta3 ? Math.cbrt(fy) : fy / (3 * delta * delta) + 4 / 29;
     fz = fz > delta3 ? Math.cbrt(fz) : fz / (3 * delta * delta) + 4 / 29;
     const L = fy * 116 - 16;
-    return Math.max(0, Math.min(255, Math.round((L * 255) / 100)));
+    const a = 500 * (fx - fy);
+    const bLab = 200 * (fy - fz);
+    return {
+        l: Math.max(0, Math.min(255, Math.round((L * 255) / 100))),
+        a: Math.max(0, Math.min(255, Math.round(a + 128))),
+        b: Math.max(0, Math.min(255, Math.round(bLab + 128))),
+    };
 }
 export function bgrBufferToRgbaBuffer(bgr, cols, rows) {
     const pixelCount = cols * rows;

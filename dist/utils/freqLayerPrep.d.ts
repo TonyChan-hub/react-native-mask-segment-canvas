@@ -10,6 +10,12 @@ export type PaintResourceBatch = {
 };
 /** OpenCV 8-bit Lab L 通道（BGR 输入，供单测与近似对照） */
 export declare function bgrToLabL(b: number, g: number, r: number): number;
+/** BGR → 8-bit Lab（L/a/b 均映射到 0–255） */
+export declare function bgrToLab(b: number, g: number, r: number): {
+    l: number;
+    a: number;
+    b: number;
+};
 export declare function bgrBufferToRgbaBuffer(bgr: Uint8Array, cols: number, rows: number): Uint8Array;
 export declare function releaseFreqLayerImages(layers: FreqLayerImages | null): void;
 /** 复用已上传的 BGR Mat，避免重复 bufferToMat + JS↔原生往返 */

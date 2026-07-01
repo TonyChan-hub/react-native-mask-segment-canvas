@@ -9,7 +9,6 @@ export type {
   MaskSegmentWatchDetail,
   MaskSegmentWatchState,
   MaskSemanticColor,
-  OverlayButtonRenderProps,
   PaintBrushRequiredPayload,
   PaintCallbackPayload,
   PaintSuccessPayload,
@@ -43,3 +42,4 @@ export {
   prewarmPngBgrCache,
   prewarmPngBgrCacheAsync,
 } from './utils/pngImage';
+export { resolveAssetPath } from './utils/resolveAssetPath';

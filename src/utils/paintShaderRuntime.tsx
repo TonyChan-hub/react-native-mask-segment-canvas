@@ -1,10 +1,10 @@
 import React from 'react';
 import {
   Skia,
-  Fill,
   Shader,
   ImageShader,
   Group,
+  Rect,
   drawAsImage,
   type SkImage,
   type SkRuntimeEffect,
@@ -75,14 +75,14 @@ function createPaintShaderTree(props: PaintShaderLayerProps) {
   };
 
   return (
-    <Fill>
+    <Rect x={x} y={y} width={width} height={height}>
       <Shader source={effect} uniforms={uniforms}>
         <ImageShader image={originImage} {...imageShaderProps} />
         <ImageShader image={paintColorMap} {...imageShaderProps} />
         <ImageShader image={lowFreqImage} {...imageShaderProps} />
         <ImageShader image={highFreqImage} {...imageShaderProps} />
       </Shader>
-    </Fill>
+    </Rect>
   );
 }
 

@@ -10,16 +10,9 @@ import React, {
 import {
   View,
   StyleSheet,
-  Button,
-  Dimensions,
-  Text,
-  TouchableOpacity,
-  ScrollView,
-  type GestureResponderEvent,
 } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import { runOnJS } from 'react-native-reanimated';
-import { launchImageLibrary } from 'react-native-image-picker';
 import cv from '../utils/opencvAdapter';
 import {
   buildAllRegionOutlinePaths,
@@ -28,15 +21,17 @@ import {
   extractRegionsFromMaskBufferSync,
   isBaseboardMaskPixel,
   upscaleBinaryMask,
+  type RegionMaskData,
   type SegmentRegion,
 } from '../utils/maskSegmentation';
+import { splitWallRegionsByTexture } from '../utils/wallTextureSplit';
 import {
   clearDerivedImageCache,
   readPngBgrBuffer,
   prewarmPngBgrCache,
   resizeBgrBuffer,
 } from '../utils/pngImage';
-import { resolveImageUrl } from '../utils/resolveImageUrl';
+import { hashUrl, resolveImageUrl } from '../utils/resolveImageUrl';
 import { compositePaintedImage } from '../utils/compositePaintedImage';
 import {
   paintedRegionsFingerprint,
@@ -89,11 +84,6 @@ export type {
   BgrColor,
   MaskSemanticColor,
 } from './MaskSegmentCanvas.types';
-
-/* ==========================================================================
- * 配置常量（屏幕相关；其余见 maskSegmentRuntime）
- * ========================================================================== */
-const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
 /* ==========================================================================
  * 类型
@@ -164,6 +154,63 @@ function canvasToNormalized(
   };
 }
 
+/** Skia matrix: pan → scale around viewport center. Matches screenToCanvasCoords. */
+function buildZoomPanMatrix(
+  panX: number,
+  panY: number,
+  scale: number,
+  canvasW: number,
+  canvasH: number,
+) {
+  const cx = canvasW / 2;
+  const cy = canvasH / 2;
+  const m = Skia.Matrix();
+  m.translate(panX, panY);
+  m.translate(cx, cy);
+  m.scale(scale, scale);
+  m.translate(-cx, -cy);
+  return m;
+}
+
+/** Clamp pan so scaled containRect does not expose empty margins beyond the viewport. */
+function clampPanOffset(
+  pan: { x: number; y: number },
+  scale: number,
+  canvasW: number,
+  canvasH: number,
+  containRect: ContainRect | null,
+): { x: number; y: number } {
+  if (!containRect || scale <= 1 || canvasW <= 0 || canvasH <= 0) {
+    return { x: 0, y: 0 };
+  }
+
+  const cx = canvasW / 2;
+  const cy = canvasH / 2;
+  const r = containRect;
+
+  const scaledMinX = cx + scale * (r.x - cx);
+  const scaledMaxX = cx + scale * (r.x + r.w - cx);
+  const scaledMinY = cy + scale * (r.y - cy);
+  const scaledMaxY = cy + scale * (r.y + r.h - cy);
+
+  let x = pan.x;
+  let y = pan.y;
+
+  if (scaledMaxX - scaledMinX > canvasW) {
+    x = Math.max(canvasW - scaledMaxX, Math.min(-scaledMinX, x));
+  } else {
+    x = 0;
+  }
+
+  if (scaledMaxY - scaledMinY > canvasH) {
+    y = Math.max(canvasH - scaledMaxY, Math.min(-scaledMinY, y));
+  } else {
+    y = 0;
+  }
+
+  return { x, y };
+}
+
 /**
  * Inverse of the Skia Group transform applied during pinch-zoom.
  * Converts a raw touch point (screen pixels) back to the canvas coordinate
@@ -179,7 +226,6 @@ function screenToCanvasCoords(
   panOffset: { x: number; y: number },
 ): { x: number; y: number } {
   if (zoomScale <= 1) return { x: screenX, y: screenY };
-  // Reverse: translate(-pan) → unscale around center → translate(+center)
   return {
     x: (screenX - panOffset.x - canvasW / 2) / zoomScale + canvasW / 2,
     y: (screenY - panOffset.y - canvasH / 2) / zoomScale + canvasH / 2,
@@ -445,11 +491,6 @@ function lookupRegionFromPickMap(
   return null;
 }
 
-/** BGR → 屏幕 RGB */
-function bgrToCss(b: number, g: number, r: number): string {
-  return `rgb(${r},${g},${b})`;
-}
-
 function releasePaintResourceLayers(layers: PaintResourceLayers | null) {
   if (!layers) {
     return;
@@ -517,24 +558,8 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
     initialSession,
     initialPaintColor,
     initialPaintConfigJson,
-    showDebugPickers = true,
-    showToolbar = true,
-    showColorBar = true,
-    showStatusRow = true,
-    showOverlayButtons = true,
     disabled = false,
     style,
-    canvasStyle,
-    maxHeight,
-    undoButtonStyle,
-    compareButtonStyle,
-    undoButtonTextStyle,
-    compareButtonTextStyle,
-    undoButtonText = '撤销',
-    compareButtonText = '对比原图',
-    compareExitButtonText = '退出对比',
-    renderUndoButton,
-    renderCompareButton,
     onWatch,
     onPaintCallback,
     onError,
@@ -713,8 +738,8 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
     void (async () => {
       try {
         const [originPath, maskPath] = await Promise.all([
-          resolveImageUrl(originSource, 'origin.png'),
-          resolveImageUrl(maskSource, 'mask.png'),
+          resolveImageUrl(originSource, `origin_${hashUrl(originSource)}.png`),
+          resolveImageUrl(maskSource, `mask_${hashUrl(maskSource)}.png`),
         ]);
         if (!cancelled) {
           setResolvedOriginPath(originPath);
@@ -809,17 +834,11 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
     cols: number;
     rows: number;
   } | null>(null);
-  const regionMaskDataRef = useRef<{
-    labels: Uint8Array;
-    baseboardBinary: Uint8Array;
-    cols: number;
-    rows: number;
-  } | null>(null);
+  const regionMaskDataRef = useRef<RegionMaskData | null>(null);
   const workBufferRef = useRef<WorkScaledBgr | null>(null);
   const paintLayersPromiseRef = useRef<Promise<void> | null>(null);
   const loadPaintLayersRef = useRef<() => Promise<void>>(() => Promise.resolve());
   const [paintResourcesReady, setPaintResourcesReady] = useState(false);
-  const [layersLoading, setLayersLoading] = useState(false);
   const [maskPathsReady, setMaskPathsReady] = useState(false);
   const baseboardPickMaskRef = useRef<Uint8Array | null>(null);
   const kickRegionIdRef = useRef<number | null>(null);
@@ -842,114 +861,61 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
   // idle segmentation / no-paint cases cheap.
   const [highResSnapshotEnabled, setHighResSnapshotEnabled] = useState(false);
 
-  // Layout measurement for the root container of this component. Declared early so
-  // the canvasW/canvasH memos (which decide the viewport rect for zoom centering,
-  // containRect placement, clipping, and gesture coordinate mapping) can close over it.
-  // When the host passes a fitted frame (VisualizationScreen's canvasFrame with explicit
-  // w/h derived from safe area + aspect, or scheme cards), we size our internal Skia
-  // canvas + gesture layer + zoom transform to that exact allocated rect.
-  const [layoutWidth, setLayoutWidth] = useState<number | null>(null);
-  const [layoutHeight, setLayoutHeight] = useState<number | null>(null);
+  // Viewport measured from canvasWrap onLayout — single source of truth for Skia,
+  // gestures, containRect, and pan clamp (must match the actual touch target).
+  const [viewportSize, setViewportSize] = useState<{ w: number; h: number } | null>(null);
 
   const [segmentsReady, setSegmentsReady] = useState(false);
   const segmentsReadyRef = useRef(false);
   const maskPathsReadyRef = useRef(false);
   const [canvasInteractive, setCanvasInteractive] = useState(false);
-  const [segError, setSegError] = useState('');
   const [compareMode, setCompareMode] = useState(false);
-  const [isRefreshing, setIsRefreshing] = useState(false);
+  const resegmentInFlightRef = useRef(false);
 
   const [originSkImg, setOriginSkImg] = useState<SkImage | null>(null);
   const originSkImgRef = useRef<SkImage | null>(null);
   const lowFreqSkImg = paintResourceLayers?.lowFreqImage ?? null;
   const highFreqSkImg = paintResourceLayers?.highFreqImage ?? null;
 
-  const canvasBaseW = SCREEN_WIDTH - 20;
+  const canvasW = viewportSize?.w ?? 1;
+  const canvasH = viewportSize?.h ?? 1;
+  const canvasLayoutReady =
+    viewportSize != null && viewportSize.w > 0 && viewportSize.h > 0;
 
-  // The "viewport" size for this canvas component: the rect inside which we place
-  // the contained image, apply the zoom Group transform (centered), clip, and receive
-  // gestures (tap + two-finger pinch). When we have a real onLayout from the host
-  // (VisualizationScreen's aspect-fitted canvasFrame, or scheme card preview area),
-  // we use the *allocated pixel size* directly as our viewport.
-  //
-  // Accurate canvasW/H is still critical for:
-  // - Correct centering of the scaled content around the viewport center.
-  // - Proper containRect (letterbox/centering of the source photo inside the viewport).
-  // - Clip rect and gesture-to-canvas coordinate conversion used by painting.
-  //
-  // Previously the code fell back to aspect-derived sizes even after layout, which
-  // could cause the effective viewport to not match the host frame. Using the onLayout
-  // result (with maxHeight fallback only when no layout yet) keeps zoom, clip, and
-  // touch mapping consistent with what the user actually sees and touches.
-  const viewportW = useMemo(() => {
-    if (layoutWidth != null && layoutHeight != null) {
-      // Primary path for viz screen and scheme cards: the exact size the host
-      // decided for this component (after its own safe-area + aspect fit).
-      return layoutWidth;
-    }
-    if (!maxHeight || maxHeight <= 0) {
-      return canvasBaseW;
-    }
-    // Fallback (no layout yet, or other usages that pass maxHeight without a
-    // tightly sized parent frame). Replicate a contain-style budget.
-    const availableW = canvasBaseW;
-    let auxHeight = 0;
-    if (showToolbar) auxHeight += 40;
-    if (showStatusRow) auxHeight += 30;
-    if (showColorBar) auxHeight += 70;
-    const availableH = Math.max(100, maxHeight - 20 - auxHeight);
-    const imgAspect = imageSize ? imageSize.w / imageSize.h : 1;
-    const containerAspect = availableW / availableH;
-    if (containerAspect > imgAspect) {
-      return Math.floor(availableH * imgAspect);
-    }
-    return availableW;
-  }, [layoutWidth, layoutHeight, maxHeight, showToolbar, showStatusRow, showColorBar, canvasBaseW, imageSize]);
-
-  const viewportH = useMemo(() => {
-    if (layoutWidth != null && layoutHeight != null) {
-      return layoutHeight;
-    }
-    if (!maxHeight || maxHeight <= 0) {
-      const imgAspect = imageSize ? imageSize.w / imageSize.h : 1;
-      return Math.floor(viewportW / imgAspect);
-    }
-    let auxHeight = 0;
-    if (showToolbar) auxHeight += 40;
-    if (showStatusRow) auxHeight += 30;
-    if (showColorBar) auxHeight += 70;
-    return Math.max(100, maxHeight - 20 - auxHeight);
-  }, [layoutWidth, layoutHeight, maxHeight, showToolbar, showStatusRow, showColorBar, viewportW, imageSize]);
-
-  // For the rest of the component, "canvasW/H" means the viewport rect size.
-  // All zoom center, wrap size, touch layer, Canvas size, clip, containRect, and
-  // gesture coordinate mapping are based on this, so that two-finger zoom centering
-  // and single-finger tap painting stay consistent with the host-allocated area.
-  const canvasW = viewportW;
-  const canvasH = viewportH;
-
-  // Refs synced to the latest viewport size so that async callbacks
-  // (segmentAndPrepareLayers) always read post-layout values instead of
-  // stale closure captures. This fixes dashed-outline offset to the bottom
-  // when the initial pathMapRect was computed with fallback SCREEN_WIDTH.
-  // Declared before segmentAndPrepareLayers so the async body can reference them.
+  // Refs synced to the latest viewport size so async callbacks read post-layout values.
   const canvasWRef = useRef(canvasW);
   const canvasHRef = useRef(canvasH);
 
-  // ── Pinch-zoom (two-finger only; single-finger drag/pan disabled) ─────────
+  // ── Pinch-zoom (focal-point) + single-finger pan when zoomed ─────────────
   const [zoomScale, setZoomScale] = useState(1);
   const [panOffset, setPanOffset] = useState({ x: 0, y: 0 });
 
   // Refs for gesture callbacks (closures don't capture fresh state mid-gesture)
   const zoomScaleRef = useRef(1);
   const panOffsetRef = useRef({ x: 0, y: 0 });
-  // Baseline value captured at gesture start to avoid jump on re-creation for pinch
-  const zoomBaseRef = useRef(1);
+  const pinchBaseScaleRef = useRef(1);
+  const pinchBasePanRef = useRef({ x: 0, y: 0 });
+  const pinchBaseFocalRef = useRef({ x: 0, y: 0 });
+  const panBaseRef = useRef({ x: 0, y: 0 });
   // Ref to the latest containRect (the actual placed photo rect inside the viewport).
   const containRectRef = useRef<ContainRect | null>(null);
 
   useEffect(() => { zoomScaleRef.current = zoomScale; }, [zoomScale]);
   useEffect(() => { panOffsetRef.current = panOffset; }, [panOffset]);
+
+  const handleCanvasWrapLayout = useCallback((width: number, height: number) => {
+    if (width <= 0 || height <= 0) {
+      return;
+    }
+    canvasWRef.current = width;
+    canvasHRef.current = height;
+    setViewportSize(prev => {
+      if (prev?.w === width && prev?.h === height) {
+        return prev;
+      }
+      return { w: width, h: height };
+    });
+  }, []);
 
   const resetZoom = useCallback(() => {
     setZoomScale(1);
@@ -1070,7 +1036,6 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
       timeLog('▶ start segmentation');
       segmentsReadyRef.current = false;
       setSegmentsReady(false);
-      setSegError('');
       setActiveBrushIndex(null);
       const clearedPainted = new Map<number, BgrColor>();
       paintedRegionsRef.current = clearedPainted;
@@ -1102,7 +1067,6 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
       setRegionOutlinePaths(new Map());
       setMaskPathsReady(false);
       setPaintResourcesReady(false);
-      setLayersLoading(false);
       baseboardPickMaskRef.current = null;
       kickRegionIdRef.current = null;
       maskPathsContainRectRef.current = null;
@@ -1216,12 +1180,23 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
           };
         });
 
-        const [segmentResult] = await Promise.all([
+        const [segmentResultRaw, workScaled] = await Promise.all([
           segmentTask,
           workScaledTask,
         ]);
         if (isCancelled()) {
           return;
+        }
+
+        let segmentResult = segmentResultRaw;
+        if (getMaskSegmentRuntimeConfig().mask.splitWalls) {
+          segmentResult = splitWallRegionsByTexture(
+            segmentResult,
+            workScaled.buffer,
+            segW,
+            segH,
+            minArea,
+          );
         }
         const paintPromise =
           paintLayersPromiseRef.current ?? Promise.resolve();
@@ -1246,6 +1221,7 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
           baseboardBinary: segmentResult.baseboardBinary,
           cols: segmentResult.segCols,
           rows: segmentResult.segRows,
+          wallSubLabels: segmentResult.wallSubLabels,
         };
         baseboardPickMaskRef.current = null;
         kickRegionIdRef.current =
@@ -1306,7 +1282,6 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
         const msg = e instanceof Error ? e.message : String(e);
         if (!isCancelled()) {
           console.error('[SDK-SEGMENT] segmentation failed', e);
-          setSegError(msg);
           reportError(msg, e);
         }
       }
@@ -1315,7 +1290,10 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
   );
 
   const loadPaintLayersIfNeeded = useCallback(() => {
-    if (paintResourcesReady) {
+    // Use the ref (synced in segmentAndPrepareLayers cleanup) rather than
+    // paintResourcesReady state — after switching origin/mask URLs the state
+    // may still read true for one frame while layers were already released.
+    if (paintResourceLayersRef.current) {
       return Promise.resolve();
     }
     if (paintLayersPromiseRef.current) {
@@ -1330,7 +1308,6 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
     const runId = segmentRunIdRef.current;
     let promise!: Promise<void>;
     promise = (async () => {
-      setLayersLoading(true);
       timeLog('▶ start loading paint shader textures');
       try {
         const result = await preparePaintResourcesFromWorkBuffer(
@@ -1374,7 +1351,6 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
           console.warn('[MaskSegment] failed to prepare paint shader textures', error);
         }
       } finally {
-        setLayersLoading(false);
         if (paintLayersPromiseRef.current === promise) {
           paintLayersPromiseRef.current = null;
         }
@@ -1382,36 +1358,16 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
     })();
     paintLayersPromiseRef.current = promise;
     return promise;
-  }, [emitInteractiveIfReady, paintResourcesReady]);
+  }, [emitInteractiveIfReady]);
 
   loadPaintLayersRef.current = loadPaintLayersIfNeeded;
 
-  const pickOriginImage = async () => {
-    const res = await launchImageLibrary({ mediaType: 'photo' });
-    const uri = res.assets?.[0]?.uri;
-    if (!uri) {
-      return;
-    }
-    const pngPath = await cv.ensurePngPath(uri, `picked_origin_${Date.now()}.png`);
-    setOriginImgPath(pngPath);
-  };
-
-  const pickMaskImage = async () => {
-    const res = await launchImageLibrary({ mediaType: 'photo' });
-    const uri = res.assets?.[0]?.uri;
-    if (!uri) {
-      return;
-    }
-    const pngPath = await cv.ensurePngPath(uri, `picked_mask_${Date.now()}.png`);
-    setMaskImgPath(pngPath);
-  };
-
   const clearCacheAndResegment = useCallback(async () => {
-    if (isRefreshing || !originImgPath || !maskImgPath) {
+    if (resegmentInFlightRef.current || !originImgPath || !maskImgPath) {
       return;
     }
 
-    setIsRefreshing(true);
+    resegmentInFlightRef.current = true;
     try {
       resetZoom();
       const layers = paintResourceLayersRef.current;
@@ -1426,13 +1382,11 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
       await segmentAndPrepareLayers(originImgPath, maskImgPath);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      setSegError(msg);
       reportError(msg, e);
     } finally {
-      setIsRefreshing(false);
+      resegmentInFlightRef.current = false;
     }
   }, [
-    isRefreshing,
     originImgPath,
     maskImgPath,
     segmentAndPrepareLayers,
@@ -1453,6 +1407,7 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
       return;
     }
 
+    resetZoom();
     segmentInFlightKeyRef.current = segmentKey;
     void segmentAndPrepareLayers(originImgPath, maskImgPath).finally(() => {
       if (segmentInFlightKeyRef.current === segmentKey) {
@@ -1485,7 +1440,7 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
       }
       setInitFlashRegionId(null);
     };
-  }, [originImgPath, maskImgPath]);
+  }, [originImgPath, maskImgPath, resetZoom]);
 
   const buildPaintedRecords = useCallback((): PaintedRegionRecord[] => {
     const records: PaintedRegionRecord[] = [];
@@ -1825,17 +1780,6 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
     [segmentsReady, imageSize, canvasW, canvasH],
   );
 
-  const selectBrushColor = useCallback(
-    (brushIndex: number) => {
-      onUserInteraction();
-      setCustomPaintColor(null);
-      customPaintConfigJsonRef.current = undefined;
-      setActiveBrushIndex(brushIndex);
-      void loadPaintLayersIfNeeded();
-    },
-    [onUserInteraction, loadPaintLayersIfNeeded],
-  );
-
   const onCanvasTap = useCallback(
     (x: number, y: number) => {
       onUserInteraction();
@@ -1897,8 +1841,12 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
   // Stable refs for functions called inside gesture closures
   const findRegionAtPointRef = useRef(findRegionAtPoint);
   const onCanvasTapRef = useRef(onCanvasTap);
+  const onUserInteractionRef = useRef(onUserInteraction);
+  const resetZoomRef = useRef(resetZoom);
   useEffect(() => { findRegionAtPointRef.current = findRegionAtPoint; }, [findRegionAtPoint]);
   useEffect(() => { onCanvasTapRef.current = onCanvasTap; }, [onCanvasTap]);
+  useEffect(() => { onUserInteractionRef.current = onUserInteraction; }, [onUserInteraction]);
+  useEffect(() => { resetZoomRef.current = resetZoom; }, [resetZoom]);
 
   const undoSelection = useCallback(() => {
     onUserInteraction();
@@ -2228,20 +2176,19 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
     );
   };
 
-  // ── Zoom transform for the Skia Group ─────────────────────────────────
-  // Note: single-finger pan/drag is disabled. Zoom is always centered around the
-  // viewport center (no additional panOffset translation). The panOffset state
-  // is kept (and forced to 0 during pinch) for compatibility with screenToCanvasCoords
-  // inverse mapping used by tap/paint logic, and for resetZoom.
-  const zoomTransform = useMemo(() => {
-    if (zoomScale <= 1) return undefined;
-    return [
-      { translateX: 0, translateY: 0 }, // panning disabled; content stays centered when zoomed
-      { translateX: canvasW / 2, translateY: canvasH / 2 },
-      { scale: zoomScale },
-      { translateX: -canvasW / 2, translateY: -canvasH / 2 },
-    ];
-  }, [zoomScale, canvasW, canvasH]);
+  // ── Zoom matrix for the Skia Group (pan + scale around center) ──────────
+  const zoomMatrix = useMemo(() => {
+    if (zoomScale <= 1) {
+      return undefined;
+    }
+    return buildZoomPanMatrix(
+      panOffset.x,
+      panOffset.y,
+      zoomScale,
+      canvasW,
+      canvasH,
+    );
+  }, [zoomScale, panOffset, canvasW, canvasH]);
 
   const renderDraw = () => {
     const displayImg = originSkImg ?? lowFreqSkImg;
@@ -2277,7 +2224,7 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
             The clip keeps drawing contained within the logical viewport and
             prevents shader content from leaking outside during zoom. */}
         <Group clip={Skia.XYWHRect(0, 0, canvasW, canvasH)}>
-          <Group transform={zoomTransform}>
+          <Group matrix={zoomMatrix}>
             {useShader && shaderOrigin ? (
               <PaintShaderLayer
                 originImage={shaderOrigin}
@@ -2364,7 +2311,7 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
         // Immediate hold highlight — fires on touch-down regardless of brush state.
         // When a brush is active, this lets the user preview which region they're
         // about to paint before lifting their finger.
-        onUserInteraction();
+        onUserInteractionRef.current?.();
         const coords = screenToCanvasCoords(
           x, y,
           canvasWRef.current, canvasHRef.current,
@@ -2446,235 +2393,162 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
           runOnJS(onFinalizeJS)(e.x, e.y);
         });
     },
-    [onUserInteraction],
+    [],   // 仅创建一次手势对象；所有回调都通过 Ref 读取最新值，避免初始化期间重复创建导致 Reanimated 节点冲突
   );
 
-  // ── Gesture: pinch-zoom (two-finger scale; max 5×) ─────────────────────
+  // ── Gesture: pinch-zoom (focal-point scale + two-finger pan; max 5×) ────
   const pinchGesture = useMemo(
     () => {
-      const onStartJS = () => {
-        zoomBaseRef.current = zoomScaleRef.current;
+      const onStartJS = (focalX: number, focalY: number) => {
+        pinchBaseScaleRef.current = zoomScaleRef.current;
+        pinchBasePanRef.current = { ...panOffsetRef.current };
+        pinchBaseFocalRef.current = { x: focalX, y: focalY };
       };
-      const onUpdateJS = (scale: number) => {
-        const newScale = Math.max(1, Math.min(zoomBaseRef.current * scale, 5));
+      const onUpdateJS = (scale: number, focalX: number, focalY: number) => {
+        const cw = canvasWRef.current;
+        const ch = canvasHRef.current;
+        if (cw <= 0 || ch <= 0) {
+          return;
+        }
+        const cx = cw / 2;
+        const cy = ch / 2;
+
+        const baseScale = pinchBaseScaleRef.current;
+        const basePan = pinchBasePanRef.current;
+        const baseFocal = pinchBaseFocalRef.current;
+
+        let newScale = Math.max(1, Math.min(baseScale * scale, 5));
+
+        const anchorX = (baseFocal.x - basePan.x - cx) / baseScale + cx;
+        const anchorY = (baseFocal.y - basePan.y - cy) / baseScale + cy;
+
+        let newPan = {
+          x: focalX - cx - newScale * (anchorX - cx),
+          y: focalY - cy - newScale * (anchorY - cy),
+        };
+
+        if (newScale <= 1) {
+          newScale = 1;
+          newPan = { x: 0, y: 0 };
+        } else {
+          newPan = clampPanOffset(
+            newPan,
+            newScale,
+            cw,
+            ch,
+            containRectRef.current,
+          );
+        }
+
         setZoomScale(newScale);
+        setPanOffset(newPan);
         zoomScaleRef.current = newScale;
-        // Lock pan offset to zero: only two-finger pinch zoom is supported.
-        // Single-finger drag/pan after zoom is intentionally disabled per product decision.
-        // Zoom is always centered; no additional translate from panOffset is applied in practice.
-        setPanOffset({ x: 0, y: 0 });
-        panOffsetRef.current = { x: 0, y: 0 };
+        panOffsetRef.current = newPan;
       };
       const onEndJS = () => {
         if (zoomScaleRef.current <= 1.01) {
-          resetZoom();
+          resetZoomRef.current?.();
         }
       };
 
       return Gesture.Pinch()
-        .onStart(() => {
+        .onStart((e) => {
           'worklet';
-          runOnJS(onStartJS)();
+          runOnJS(onStartJS)(e.focalX, e.focalY);
         })
         .onUpdate((e) => {
           'worklet';
-          runOnJS(onUpdateJS)(e.scale);
+          runOnJS(onUpdateJS)(e.scale, e.focalX, e.focalY);
         })
         .onEnd(() => {
           'worklet';
           runOnJS(onEndJS)();
         });
     },
-    [resetZoom],
+    [],
   );
 
-  // ── Composed: Race ensures single-tap and pinch-zoom never conflict ─────────
+  // ── Gesture: single-finger pan (active only when zoomed) ───────────────
+  const panGesture = useMemo(
+    () => {
+      const onStartJS = () => {
+        panBaseRef.current = { ...panOffsetRef.current };
+      };
+      const onUpdateJS = (translationX: number, translationY: number) => {
+        if (zoomScaleRef.current <= 1) {
+          return;
+        }
+        const newPan = clampPanOffset(
+          {
+            x: panBaseRef.current.x + translationX,
+            y: panBaseRef.current.y + translationY,
+          },
+          zoomScaleRef.current,
+          canvasWRef.current,
+          canvasHRef.current,
+          containRectRef.current,
+        );
+        setPanOffset(newPan);
+        panOffsetRef.current = newPan;
+      };
+      const onEndJS = () => {
+        if (zoomScaleRef.current <= 1.01) {
+          resetZoomRef.current?.();
+        }
+      };
+
+      return Gesture.Pan()
+        .minPointers(1)
+        .maxPointers(1)
+        .minDistance(10)
+        .onStart(() => {
+          'worklet';
+          runOnJS(onStartJS)();
+        })
+        .onUpdate((e) => {
+          'worklet';
+          runOnJS(onUpdateJS)(e.translationX, e.translationY);
+        })
+        .onEnd(() => {
+          'worklet';
+          runOnJS(onEndJS)();
+        });
+    },
+    [],
+  );
+
+  // ── Composed: pinch + pan simultaneous; tap only when neither claims ───
   const composedGesture = useMemo(
-    () => Gesture.Race(tapGesture, pinchGesture),
-    [tapGesture, pinchGesture],
+    () =>
+      Gesture.Exclusive(
+        Gesture.Simultaneous(pinchGesture, panGesture),
+        tapGesture,
+      ),
+    [],
   );
 
 
   return (
-    <View
-      style={[styles.container, style]}
-      onLayout={(e) => {
-        const { width, height } = e.nativeEvent.layout;
-        setLayoutWidth(width);
-        setLayoutHeight(height);
-      }}
-    >
-      {/* Only render the internal ScrollView (and its control bars) when any of
-          the auxiliary UI rows are requested. In the main VisualizationScreen
-          (and scheme card live previews) all of showToolbar/showDebug/showStatus/showColorBar
-          are false, so we omit this entirely.
-
-          This conditional is still important for gesture integrity:
-          - An always-mounted vertical ScrollView can participate in the responder system
-            and steal touches (vertical moves, or even interfere with two-finger pinch).
-          - The GestureDetector (for tap/pinch) is a sibling after the ScrollView in the
-            tree when the ScrollView is rendered, so it may not receive the intended gestures.
-          - By omitting the ScrollView when unused, the canvas touch layer + GestureDetector
-            become direct children and reliably receive single-finger taps and two-finger pinches. */}
-      {(showToolbar || showDebugPickers || showStatusRow || showColorBar) ? (
-        <ScrollView
-          style={styles.scroll}
-          showsVerticalScrollIndicator={false}
-          contentContainerStyle={styles.scrollContent}
-          keyboardShouldPersistTaps="always"
-        >
-          {showToolbar && (
-            <View style={styles.toolbarRow}>
-              <Button
-                title={isRefreshing ? 're-segmenting…' : 'clear cache and re-segment'}
-                onPress={clearCacheAndResegment}
-                disabled={isRefreshing || !originImgPath || !maskImgPath}
-              />
-            </View>
-          )}
-
-          {showDebugPickers && (
-            <View style={styles.btnRow}>
-              <Button title="pick origin image" onPress={pickOriginImage} />
-              <View style={styles.btnGap} />
-              <Button title="pick mask image" onPress={pickMaskImage} />
-            </View>
-          )}
-
-          {showStatusRow && (
-            <View style={styles.statusRow}>
-              {segError ? (
-                <Text style={styles.err}>❌ {segError}</Text>
-              ) : !segmentsReady ? (
-                <Text style={styles.hint}>⏳ segmenting…</Text>
-              ) : layersLoading || !paintResourcesReady ? (
-                <Text style={styles.hint}>
-                  ✅ {regionCount} regions · Shader textures preparing…
-                </Text>
-              ) : !(originSkImg ?? lowFreqSkImg) ? (
-                <Text style={styles.hint}>⏳ image loading…</Text>
-              ) : (
-                <Text style={styles.hint}>
-                  ✅ {regionCount} regions · painted {paintedRegions.size} ·{' '}
-                  {hasActiveBrush
-                    ? customPaintColor
-                      ? 'custom paint color'
-                      : `paint color ${(activeBrushIndex ?? 0) + 1}`
-                    : 'please select the bottom paint color first'}
-                  {' · '}
-                  {compareMode ? 'compare original image' : 'paint mode'}
-                </Text>
-              )}
-            </View>
-          )}
-
-          {showColorBar && (
-            <View style={styles.colorBar}>
-              <Text style={styles.colorBarLabel}>
-                paint color (tap to select, then tap canvas to paint)
-              </Text>
-              <View style={styles.colorSwatches}>
-                {paintPalette.map((color, index) => {
-                  const isActive =
-                    activeBrushIndex === index && customPaintColor == null;
-                  const { b, g, r } = color;
-                  return (
-                    <TouchableOpacity
-                      key={index}
-                      style={[
-                        styles.colorSwatch,
-                        { backgroundColor: bgrToCss(b, g, r) },
-                        isActive && styles.colorSwatchSelected,
-                      ]}
-                      activeOpacity={0.8}
-                      disabled={!segmentsReady || disabled}
-                      onPress={() => selectBrushColor(index)}
-                    />
-                  );
-                })}
-                {!segmentsReady && (
-                  <Text style={styles.colorBarEmpty}>loading…</Text>
-                )}
-              </View>
-              {customPaintColor && (
-                <Text style={styles.hint}>
-                  current custom paint color is set by ref.setPaintColor
-                </Text>
-              )}
-            </View>
-          )}
-        </ScrollView>
-      ) : null}
-
+    <View style={[styles.container, style]}>
       <View
-        style={[styles.canvasOuter, canvasStyle]}
+        style={styles.canvasWrap}
+        onLayout={(e) => {
+          const { width, height } = e.nativeEvent.layout;
+          handleCanvasWrapLayout(width, height);
+        }}
       >
-        <View
-          style={[styles.canvasWrap, { width: canvasW, height: canvasH }]}
-        >
+        {canvasLayoutReady ? (
           <GestureDetector gesture={composedGesture}>
-            <View style={[styles.canvasTouchLayer, { width: canvasW, height: canvasH }]}>
-              <Canvas style={{ width: canvasW, height: canvasH }} pointerEvents="none">
+            <View style={{ width: canvasW, height: canvasH }}>
+              <Canvas
+                style={{ width: canvasW, height: canvasH }}
+                pointerEvents="none"
+              >
                 {renderDraw()}
               </Canvas>
             </View>
           </GestureDetector>
-
-          {showOverlayButtons &&
-            (renderUndoButton ? (
-              renderUndoButton({
-                onPress: undoSelection,
-                disabled: paintHistory.length === 0,
-                text: undoButtonText,
-              })
-            ) : (
-              <TouchableOpacity
-                style={[styles.overlayBtn, styles.btnBottomLeft, undoButtonStyle]}
-                activeOpacity={0.7}
-                disabled={paintHistory.length === 0 || disabled}
-                onPress={undoSelection}
-              >
-                <Text
-                  style={[
-                    styles.btnText,
-                    undoButtonTextStyle,
-                    { opacity: paintHistory.length === 0 ? 0.4 : 1 },
-                  ]}
-                >
-                  {undoButtonText}
-                </Text>
-              </TouchableOpacity>
-            ))}
-
-          {showOverlayButtons &&
-            (renderCompareButton ? (
-              renderCompareButton({
-                onPress: () => {
-                  onUserInteraction();
-                  setCompareMode(v => !v);
-                },
-                text: compareMode ? compareExitButtonText : compareButtonText,
-              })
-            ) : (
-              <TouchableOpacity
-                style={[
-                  styles.overlayBtn,
-                  styles.btnBottomRight,
-                  compareButtonStyle,
-                ]}
-                activeOpacity={0.7}
-                disabled={disabled}
-                onPress={() => {
-                  onUserInteraction();
-                  setCompareMode(v => !v);
-                }}
-              >
-                <Text style={[styles.btnText, compareButtonTextStyle]}>
-                  {compareMode ? compareExitButtonText : compareButtonText}
-                </Text>
-              </TouchableOpacity>
-            ))}
-        </View>
+        ) : null}
       </View>
 
       {highResSnapshotEnabled && exportCanvasSize ? (
@@ -2710,122 +2584,15 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#fff',
   },
-  scroll: {
-    flex: 1,
-  },
-  scrollContent: {
-    padding: 10,
-    paddingBottom: 28,
-  },
-  toolbarRow: {
-    marginBottom: 8,
-  },
-  btnRow: {
-    flexDirection: 'row',
-    marginBottom: 8,
-  },
-  btnGap: {
-    width: 10,
-  },
-  statusRow: {
-    marginBottom: 8,
-  },
-  hint: {
-    color: '#333',
-    fontSize: 13,
-  },
-  err: {
-    color: '#c33',
-    fontSize: 13,
-  },
   canvasWrap: {
+    flex: 1,
+    width: '100%',
+    alignSelf: 'stretch',
     position: 'relative',
     backgroundColor: '#f5f5f5',
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: '#ddd',
     overflow: 'hidden',
-  },
-  canvasOuter: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    // When the internal control ScrollView is omitted (the normal case for
-    // VisualizationScreen and non-interactive scheme previews), this makes the
-    // canvas area fill the bounds provided by the host (via style + maxHeight)
-    // and centers the fixed-size image rect. This also ensures the
-    // GestureDetector sits in the right place to receive taps and two-finger pinches.
-    flex: 1,
-  },
-  canvasTouchLayer: {
-    flex: 1,
-  },
-  canvas: {
-    flex: 1,
-  },
-  overlayBtn: {
-    position: 'absolute',
-    bottom: 10,
-    paddingHorizontal: 14,
-    paddingVertical: 7,
-    backgroundColor: 'rgba(0, 0, 0, 0.62)',
-    borderRadius: 6,
-  },
-  btnBottomLeft: {
-    left: 10,
-  },
-  btnBottomRight: {
-    right: 10,
-  },
-  btnText: {
-    color: '#fff',
-    fontSize: 13,
-    fontWeight: '600',
-  },
-  colorBar: {
-    marginTop: 12,
-    paddingVertical: 10,
-    paddingHorizontal: 4,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: '#e0e0e0',
-  },
-  colorBarLabel: {
-    fontSize: 12,
-    color: '#666',
-    marginBottom: 10,
-  },
-  colorSwatches: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    alignItems: 'center',
-    gap: 12,
-  },
-  colorSwatch: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    borderWidth: 2,
-    borderColor: 'rgba(0,0,0,0.12)',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  colorSwatchSelected: {
-    borderColor: '#1e96ff',
-    borderWidth: 3,
-    transform: [{ scale: 1.08 }],
-  },
-  colorSwatchPainted: {
-    borderColor: 'rgba(255,255,255,0.9)',
-  },
-  colorSwatchDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: 'rgba(255,255,255,0.92)',
-    borderWidth: 1,
-    borderColor: 'rgba(0,0,0,0.25)',
-  },
-  colorBarEmpty: {
-    fontSize: 13,
-    color: '#999',
   },
 });
 

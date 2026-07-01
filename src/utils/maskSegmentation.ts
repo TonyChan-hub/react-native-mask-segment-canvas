@@ -30,6 +30,8 @@ export type SegmentMaskResult = {
   baseboardBinary: Uint8Array;
   segCols: number;
   segRows: number;
+  /** splitWalls 时：墙像素 → 子区索引 0..N-1，非墙为 WALL_SUB_LABEL_NONE */
+  wallSubLabels?: Uint8Array;
 };
 
 export type SegmentRegion = {
@@ -548,18 +550,24 @@ function extractRegionBinaries(
   regions: SegmentRegion[],
   maskData: RegionMaskData,
 ): Map<number, Uint8Array> {
-  const { labels, baseboardBinary, cols, rows } = maskData;
+  const { labels, baseboardBinary, cols, rows, wallSubLabels } = maskData;
   const size = cols * rows;
   const binaries = new Map<number, Uint8Array>();
   const semanticColors = getMaskSegmentRuntimeConfig().mask.semanticColors;
   const regionIdBySemantic = new Int32Array(semanticColors.length);
   regionIdBySemantic.fill(-1);
+  const wallSubRegionIds = new Map<number, number>();
   let baseboardRegionId: number | null = null;
 
   for (const reg of regions) {
     binaries.set(reg.id, new Uint8Array(size));
     if (reg.thinStrip) {
       baseboardRegionId = reg.id;
+      continue;
+    }
+    const wallMatch = /^wall-(\d+)$/.exec(reg.name);
+    if (wallMatch && wallSubLabels) {
+      wallSubRegionIds.set(Number(wallMatch[1]) - 1, reg.id);
       continue;
     }
     const semanticIndex = semanticColors.findIndex(
@@ -571,9 +579,20 @@ function extractRegionBinaries(
   }
 
   const semanticCount = semanticColors.length;
+  const wallIdx = semanticColors.findIndex(entry => entry.name === 'wall');
   for (let i = 0; i < size; i++) {
     if (baseboardRegionId != null && baseboardBinary[i] > 0) {
       binaries.get(baseboardRegionId)![i] = 255;
+      continue;
+    }
+    if (wallSubLabels && wallIdx >= 0 && labels[i] === wallIdx) {
+      const subIdx = wallSubLabels[i];
+      if (subIdx !== 255) {
+        const regionId = wallSubRegionIds.get(subIdx);
+        if (regionId !== undefined) {
+          binaries.get(regionId)![i] = 255;
+        }
+      }
       continue;
     }
     const semanticIndex = labels[i];
@@ -942,6 +961,7 @@ export type RegionMaskData = {
   baseboardBinary: Uint8Array;
   cols: number;
   rows: number;
+  wallSubLabels?: Uint8Array;
 };
 
 /** 蒙版路径构建降采样（屏幕显示不需要分割分辨率，点击仍用全分辨率 pickMap） */
@@ -949,7 +969,7 @@ export function downsampleMaskDataForPaths(
   maskData: RegionMaskData,
   maxLongSide: number,
 ): RegionMaskData {
-  const { labels, baseboardBinary, cols, rows } = maskData;
+  const { labels, baseboardBinary, cols, rows, wallSubLabels } = maskData;
   const longSide = Math.max(cols, rows);
   if (longSide <= maxLongSide) {
     return maskData;
@@ -960,6 +980,11 @@ export function downsampleMaskDataForPaths(
   const dstRows = Math.max(1, Math.floor(rows * scale));
   const outLabels = new Uint8Array(dstCols * dstRows);
   const outBaseboard = new Uint8Array(dstCols * dstRows);
+  const outWallSub =
+    wallSubLabels != null ? new Uint8Array(dstCols * dstRows) : undefined;
+  if (outWallSub) {
+    outWallSub.fill(255);
+  }
 
   for (let y = 0; y < dstRows; y++) {
     const sy = Math.min(rows - 1, Math.floor((y * rows) / dstRows));
@@ -971,6 +996,9 @@ export function downsampleMaskDataForPaths(
       const di = dstRow + x;
       outLabels[di] = labels[si];
       outBaseboard[di] = baseboardBinary[si];
+      if (outWallSub && wallSubLabels) {
+        outWallSub[di] = wallSubLabels[si];
+      }
     }
   }
 
@@ -979,6 +1007,7 @@ export function downsampleMaskDataForPaths(
     baseboardBinary: outBaseboard,
     cols: dstCols,
     rows: dstRows,
+    wallSubLabels: outWallSub,
   };
 }
 
