@@ -43,3 +43,4 @@ export {
   prewarmPngBgrCache,
   prewarmPngBgrCacheAsync,
 } from './utils/pngImage';
+export { resolveAssetPath } from './utils/resolveAssetPath';

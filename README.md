@@ -57,9 +57,9 @@ cd ios && pod install && cd ..
 
 确保宿主已按各原生库文档完成 Skia、Reanimated、OpenCV 等配置。
 
-### Metro 配置（npm link 时）
+### Metro 配置（npm link / monorepo / file: 依赖时）
 
-联调时若出现模块解析问题，在宿主 `metro.config.js` 中把本库加入 `watchFolders` / `extraNodeModules`（按宿主 Metro 版本调整）：
+联调时若出现模块解析问题，在宿主 `metro.config.js` 中把本库加入 `watchFolders`，并使用下面推荐的完整配置（同时包含 extraNodeModules + blockList）。这是防止所有「类似重复模块问题」（SkiaPictureView undefined、Reanimated Animated node already exists 等）的可靠做法：
 
 ```js
 const path = require('path');
@@ -68,9 +68,50 @@ module.exports = {
   watchFolders: [path.resolve(__dirname, '../MaskSegmentApp')],
   resolver: {
     nodeModulesPaths: [path.resolve(__dirname, 'node_modules')],
+    // 推荐同时使用 extraNodeModules + blockList
+    extraNodeModules: {
+      'react-native-reanimated': path.resolve(__dirname, 'node_modules/react-native-reanimated'),
+      '@shopify/react-native-skia': path.resolve(__dirname, 'node_modules/@shopify/react-native-skia'),
+      'react-native-gesture-handler': path.resolve(__dirname, 'node_modules/react-native-gesture-handler'),
+      'react-native-fast-opencv': path.resolve(__dirname, 'node_modules/react-native-fast-opencv'),
+      'react-native-safe-area-context': path.resolve(__dirname, 'node_modules/react-native-safe-area-context'),
+      'react-native-fs': path.resolve(__dirname, 'node_modules/react-native-fs'),
+    },
+    blockList: [
+      /\/MaskSegmentApp\/node_modules\/@shopify\/react-native-skia\//,
+      /\/MaskSegmentApp\/node_modules\/react-native-reanimated\//,
+      /\/MaskSegmentApp\/node_modules\/react-native-fast-opencv\//,
+      /\/MaskSegmentApp\/node_modules\/react-native-gesture-handler\//,
+      /\/MaskSegmentApp\/node_modules\/react-native-safe-area-context\//,
+      /\/MaskSegmentApp\/node_modules\/react-native-fs\//,
+    ],
   },
 };
 ```
+
+**强烈建议**在宿主 `index.js` 最顶部加入（在任何业务代码之前）：
+
+```js
+import '@shopify/react-native-skia';
+```
+
+（完整推荐配置见下文「故障排查」以及 `example/metro.config.js` + `example/index.js`，那里有覆盖全部 peer 的 singletons 列表。）
+
+### 故障排查：各种重复模块导致的运行时错误
+
+常见症状（同类问题）：
+
+- `SkiaPictureView must be a function (received 'undefined')`
+- `createAnimatedNode: Animated node[...] already exists`
+
+**几乎总是**因为 Metro 同时解析到多份 reanimated / skia / gesture-handler / fast-opencv / safe-area 等包。
+
+**最佳实践**：
+- 直接复制 `example/metro.config.js` 里的 `singletonPackages` + extraNodeModules + blockList 写法
+- 在你的 `index.js` 最顶部加入 gesture-handler → reanimated → skia 三个 import
+- 重启 Metro (`--reset-cache`) + 重装 app
+
+详细清单和模板见 `example/README.md` 的「运行时出现类似错误」一节。
 
 ### 业务侧引入
 

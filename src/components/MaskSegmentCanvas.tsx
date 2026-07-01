@@ -36,7 +36,7 @@ import {
   prewarmPngBgrCache,
   resizeBgrBuffer,
 } from '../utils/pngImage';
-import { resolveImageUrl } from '../utils/resolveImageUrl';
+import { hashUrl, resolveImageUrl } from '../utils/resolveImageUrl';
 import { compositePaintedImage } from '../utils/compositePaintedImage';
 import {
   paintedRegionsFingerprint,
@@ -713,8 +713,8 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
     void (async () => {
       try {
         const [originPath, maskPath] = await Promise.all([
-          resolveImageUrl(originSource, 'origin.png'),
-          resolveImageUrl(maskSource, 'mask.png'),
+          resolveImageUrl(originSource, `origin_${hashUrl(originSource)}.png`),
+          resolveImageUrl(maskSource, `mask_${hashUrl(maskSource)}.png`),
         ]);
         if (!cancelled) {
           setResolvedOriginPath(originPath);
@@ -1315,7 +1315,10 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
   );
 
   const loadPaintLayersIfNeeded = useCallback(() => {
-    if (paintResourcesReady) {
+    // Use the ref (synced in segmentAndPrepareLayers cleanup) rather than
+    // paintResourcesReady state — after switching origin/mask URLs the state
+    // may still read true for one frame while layers were already released.
+    if (paintResourceLayersRef.current) {
       return Promise.resolve();
     }
     if (paintLayersPromiseRef.current) {
@@ -1382,7 +1385,7 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
     })();
     paintLayersPromiseRef.current = promise;
     return promise;
-  }, [emitInteractiveIfReady, paintResourcesReady]);
+  }, [emitInteractiveIfReady]);
 
   loadPaintLayersRef.current = loadPaintLayersIfNeeded;
 
@@ -1897,8 +1900,12 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
   // Stable refs for functions called inside gesture closures
   const findRegionAtPointRef = useRef(findRegionAtPoint);
   const onCanvasTapRef = useRef(onCanvasTap);
+  const onUserInteractionRef = useRef(onUserInteraction);
+  const resetZoomRef = useRef(resetZoom);
   useEffect(() => { findRegionAtPointRef.current = findRegionAtPoint; }, [findRegionAtPoint]);
   useEffect(() => { onCanvasTapRef.current = onCanvasTap; }, [onCanvasTap]);
+  useEffect(() => { onUserInteractionRef.current = onUserInteraction; }, [onUserInteraction]);
+  useEffect(() => { resetZoomRef.current = resetZoom; }, [resetZoom]);
 
   const undoSelection = useCallback(() => {
     onUserInteraction();
@@ -2364,7 +2371,7 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
         // Immediate hold highlight — fires on touch-down regardless of brush state.
         // When a brush is active, this lets the user preview which region they're
         // about to paint before lifting their finger.
-        onUserInteraction();
+        onUserInteractionRef.current?.();
         const coords = screenToCanvasCoords(
           x, y,
           canvasWRef.current, canvasHRef.current,
@@ -2446,7 +2453,7 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
           runOnJS(onFinalizeJS)(e.x, e.y);
         });
     },
-    [onUserInteraction],
+    [],   // 仅创建一次手势对象；所有回调都通过 Ref 读取最新值，避免初始化期间重复创建导致 Reanimated 节点冲突
   );
 
   // ── Gesture: pinch-zoom (two-finger scale; max 5×) ─────────────────────
@@ -2467,7 +2474,7 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
       };
       const onEndJS = () => {
         if (zoomScaleRef.current <= 1.01) {
-          resetZoom();
+          resetZoomRef.current?.();
         }
       };
 
@@ -2485,13 +2492,15 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
           runOnJS(onEndJS)();
         });
     },
-    [resetZoom],
+    [],   // 仅创建一次；通过 Ref 访问 resetZoom
   );
 
   // ── Composed: Race ensures single-tap and pinch-zoom never conflict ─────────
+  // 依赖置空 + 内部的 tap/pinch 也用 []，保证整个手势描述符树只在 mount 时创建一次。
+  // 避免初始化阶段反复创建导致 Reanimated / RNGH 内部节点重复分配。
   const composedGesture = useMemo(
     () => Gesture.Race(tapGesture, pinchGesture),
-    [tapGesture, pinchGesture],
+    [],
   );
 
 

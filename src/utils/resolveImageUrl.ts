@@ -2,7 +2,7 @@ import { Platform } from 'react-native';
 import RNFS from 'react-native-fs';
 import { ensurePngFile, isPngPath, normalizePath, toPngFileName } from './pngImage';
 
-function hashUrl(url: string): string {
+export function hashUrl(url: string): string {
   let hash = 0;
   for (let i = 0; i < url.length; i++) {
     hash = (hash * 31 + url.charCodeAt(i)) | 0;
@@ -57,6 +57,25 @@ export async function resolveImageUrl(
 
   if (await RNFS.exists(normalized)) {
     return ensurePngFile(normalized, pngCacheName);
+  }
+
+  // Android bundled assets: resolveAssetSource may yield asset:/ or
+  // file:///android_asset/ URIs that RNFS cannot read directly.
+  if (Platform.OS === 'android') {
+    const assetPath = trimmed
+      .replace(/^asset:\/?\/?/, '')
+      .replace(/^file:\/\/\/android_asset\//, '');
+    if (assetPath !== trimmed) {
+      const tmpDest = `${RNFS.CachesDirectoryPath}/tmp_${Date.now()}_${pngCacheName}`;
+      await RNFS.copyFileAssets(assetPath, tmpDest);
+      try {
+        return await ensurePngFile(tmpDest, pngCacheName);
+      } finally {
+        if (await RNFS.exists(tmpDest)) {
+          await RNFS.unlink(tmpDest);
+        }
+      }
+    }
   }
 
   return ensurePngFile(trimmed, pngCacheName);
