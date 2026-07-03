@@ -1,3 +1,7 @@
+[**🇨🇳 中文**](README.zh-CN.md)
+
+---
+
 # 🎨 react-native-mask-segment-canvas
 
 A React Native **0.79** interactive mask segmentation library. The core export is the `MaskSegmentCanvas` component, consumable via **npm package** or **npm link** from any React Native project.
