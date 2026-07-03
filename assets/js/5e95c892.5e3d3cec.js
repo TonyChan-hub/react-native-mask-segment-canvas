@@ -1,0 +1,1 @@
+"use strict";(self.webpackChunkmask_segment_canvas_docs=self.webpackChunkmask_segment_canvas_docs||[]).push([[647],{8122:(s,e,a)=>{a.r(e),a.d(e,{default:()=>k});a(6540);var c=a(4164),n=a(1769),r=a(204),t=a(2831),u=a(1410),d=a(4848);function k(s){return(0,d.jsx)(n.e3,{className:(0,c.A)(r.G.wrapper.docsPages),children:(0,d.jsx)(u.A,{children:(0,t.v)(s.route.routes)})})}}}]);

@@ -1,0 +1,1 @@
+"use strict";(self.webpackChunkmask_segment_canvas_docs=self.webpackChunkmask_segment_canvas_docs||[]).push([[235],{8552:s=>{s.exports=JSON.parse('{"name":"docusaurus-plugin-content-pages","id":"default"}')}}]);
