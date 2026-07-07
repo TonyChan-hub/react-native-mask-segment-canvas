@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="generator" content="Docusaurus v3.7.0">
 <title data-rh="true">概述 | MaskSegmentCanvas</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:image" content="https://tonychan-hub.github.io/react-native-mask-segment-canvas/zh-CN/img/og-image.png"><meta data-rh="true" name="twitter:image" content="https://tonychan-hub.github.io/react-native-mask-segment-canvas/zh-CN/img/og-image.png"><meta data-rh="true" property="og:url" content="https://tonychan-hub.github.io/react-native-mask-segment-canvas/zh-CN/docs/intro"><meta data-rh="true" property="og:locale" content="zh_CN"><meta data-rh="true" property="og:locale:alternate" content="en"><meta data-rh="true" name="docusaurus_locale" content="zh-CN"><meta data-rh="true" name="docsearch:language" content="zh-CN"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="概述 | MaskSegmentCanvas"><meta data-rh="true" name="description" content="一个 React Native 0.79 交互式遮罩分割库。核心导出为 MaskSegmentCanvas 组件，可通过 npm 包 或 npm link 在任何 React Native 项目中使用。"><meta data-rh="true" property="og:description" content="一个 React Native 0.79 交互式遮罩分割库。核心导出为 MaskSegmentCanvas 组件，可通过 npm 包 或 npm link 在任何 React Native 项目中使用。"><link data-rh="true" rel="icon" href="/react-native-mask-segment-canvas/zh-CN/img/favicon.ico"><link data-rh="true" rel="canonical" href="https://tonychan-hub.github.io/react-native-mask-segment-canvas/zh-CN/docs/intro"><link data-rh="true" rel="alternate" href="https://tonychan-hub.github.io/react-native-mask-segment-canvas/docs/intro" hreflang="en"><link data-rh="true" rel="alternate" href="https://tonychan-hub.github.io/react-native-mask-segment-canvas/zh-CN/docs/intro" hreflang="zh-CN"><link data-rh="true" rel="alternate" href="https://tonychan-hub.github.io/react-native-mask-segment-canvas/docs/intro" hreflang="x-default"><link rel="stylesheet" href="/react-native-mask-segment-canvas/zh-CN/assets/css/styles.535eddfb.css">
-<script src="/react-native-mask-segment-canvas/zh-CN/assets/js/runtime~main.d917222b.js" defer="defer"></script>
+<script src="/react-native-mask-segment-canvas/zh-CN/assets/js/runtime~main.d5633c5e.js" defer="defer"></script>
 <script src="/react-native-mask-segment-canvas/zh-CN/assets/js/main.b6021037.js" defer="defer"></script>
 </head>
 <body class="navigation-with-keyboard">
@@ -14,6 +14,7 @@
 <li>🧠 <strong>OpenCV</strong> (<code>react-native-fast-opencv</code>)：遮罩语义布局、踢脚线修补、区域提取</li>
 <li>🖌️ <strong>Skia RuntimeEffect (SkSL)</strong>：单 Pass 全屏着色器，混合原图 + LAB 低频/高频纹理颜色叠加</li>
 <li>✂️ <strong>Skia Path</strong>：区域虚线轮廓高亮</li>
+<li>🧲 <strong>磁性套索（Magnetic Lasso）</strong>：手动墙面分区，支持边缘吸附（Sobel 梯度 + Dijkstra 最短路径）和主动轮廓边界精炼</li>
 <li>👆 <strong>交互</strong>：底部颜色条选择画笔（可选初始化）→ 点击区域上色；未选择画笔时点击会触发 <code>onPaintCallback</code> 并附带提示；未选画笔时长按可预览区域的虚线轮廓</li>
 </ul>
 <p>本仓库同时作为 <strong>库源码</strong>（<code>src/index.ts</code>）和 <strong>自测 Demo</strong>（根目录 <code>App.tsx</code>）。</p>
@@ -26,6 +27,7 @@
 <li>🧩 <strong>分割</strong>通过 OpenCV 将遮罩分割为语义区域（墙面、天花板、踢脚线等）</li>
 <li>🎨 <strong>准备</strong>通过 SkSL 生成 LAB 频域层纹理，实现逼真的颜色混合</li>
 <li>📐 <strong>构建</strong>每个区域的 Skia 虚线轮廓路径</li>
+<li>🧲 <strong>手动分割</strong>（可选）— 在墙面上绘制套索多边形，将其细分为可独立上色的 <code>wall-N</code> 区域，可选边缘吸附和主动轮廓精炼</li>
 <li>👆 <strong>交互</strong> — 用户选择画笔颜色并点击区域上色；上色层保留底层纹理</li>
 <li>💾 <strong>保存</strong>合成结果为 PNG；导出 JSON 会话用于草稿恢复</li>
 </ol>
