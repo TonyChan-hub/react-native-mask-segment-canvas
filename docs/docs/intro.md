@@ -14,6 +14,7 @@ A React Native **0.79** interactive mask segmentation library. The core export i
 - 🧠 **OpenCV** (`react-native-fast-opencv`): mask semantic layout, baseboard patching, region extraction
 - 🖌️ **Skia RuntimeEffect (SkSL)**: single-pass full-screen shader blending original image + LAB low/high frequency texture color overlays
 - ✂️ **Skia Path**: dashed outline highlights for regions
+- 🧲 **Magnetic Lasso**: manual wall partitioning with edge-snapping (Sobel gradient + Dijkstra shortest-path) and Active Contour boundary refinement
 - 👆 **Interaction**: bottom color bar for brush selection (optional initialization) → tap a region to paint; tapping without a brush selected fires `onPaintCallback` with a hint; long-press without a brush previews the region's dashed outline
 
 This repository serves as both the **library source** (`src/index.ts`) and a **self-test demo** (root `App.tsx`).
@@ -30,8 +31,9 @@ This repository serves as both the **library source** (`src/index.ts`) and a **s
 2. 🧩 **Segment** the mask via OpenCV into semantic regions (walls, ceiling, baseboard, etc.)
 3. 🎨 **Prepare** LAB frequency-layer textures via SkSL for realistic color blending
 4. 📐 **Build** Skia dashed-outline paths for each region
-5. 👆 **Interactive** — users select a brush color and tap regions to paint; paint layers preserve the underlying texture
-6. 💾 **Save** the composited result as PNG; export a JSON session for draft recovery
+5. 🧲 **Manual Split** (optional) — draw lasso polygons on walls to subdivide into independently-paintable `wall-N` regions, with optional edge-snapping and Active Contour refinement
+6. 👆 **Interactive** — users select a brush color and tap regions to paint; paint layers preserve the underlying texture
+7. 💾 **Save** the composited result as PNG; export a JSON session for draft recovery
 
 The component emits `onWatch` state transitions through the pipeline so the host app can show appropriate loading states.
 

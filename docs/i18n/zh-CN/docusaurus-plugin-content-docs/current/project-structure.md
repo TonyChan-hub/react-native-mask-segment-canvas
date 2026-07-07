@@ -17,6 +17,9 @@ MaskSegmentApp/                              # 仓库根目录（npm 包 react-n
 │       ├── maskSegmentation.ts
 │       ├── maskSegmentRuntime.ts
 │       ├── maskSemanticPalette.ts
+│       ├── magneticLasso.ts          # 边缘吸附套索（Sobel + Dijkstra）
+│       ├── activeContour.ts          # 主动轮廓精炼（Snake + Balloon）
+│       ├── wallTextureSplit.ts       # 自动与手动墙面纹理分割
 │       └── ...
 ├── example/                                 # ★ 推荐：消费方集成 Demo
 │   ├── App.tsx                              # 仅使用公开 API 的完整示例

@@ -1,6 +1,6 @@
 {
   "name": "react-native-mask-segment-canvas",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "React Native mask segmentation canvas library: OpenCV semantic segmentation + SkSL Shader coloring",
   "main": "dist/index.js",
   "module": "dist/index.js",

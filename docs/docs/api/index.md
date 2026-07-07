@@ -23,6 +23,8 @@ import MaskSegmentCanvas, {
   type PaintConfig,
   type InteractionConfig,
   type SavePaintResult,
+  type LassoPolygon,
+  type ManualWallPartition,
   MASK_SEMANTIC_COLORS,
   BASEBOARD_SEMANTIC_NAME,
   prewarmPngBgrCacheAsync,
@@ -38,6 +40,7 @@ import MaskSegmentCanvas, {
 | Component | `MaskSegmentCanvas` (default) |
 | Ref / Props types | `MaskSegmentCanvasRef`, `MaskSegmentCanvasProps` |
 | Session / callback types | `MaskSegmentSession`, `PaintCallbackPayload`, `PaintedRegionRecord`, `SavePaintResult` |
+| Lasso types | `LassoPolygon`, `ManualWallPartition` |
 | Watch types | `MaskSegmentWatchState`, `MaskSegmentWatchDetail` |
 | Config types | `PipelineConfig`, `MaskSegmentConfig`, `PaintConfig`, `InteractionConfig` |
 | Semantic colors | `MASK_SEMANTIC_COLORS`, `BASEBOARD_SEMANTIC_NAME` |

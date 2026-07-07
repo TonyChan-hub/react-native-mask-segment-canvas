@@ -53,6 +53,33 @@ export type MaskSegmentConfig = {
     splitWallsChromaBlurRadius?: number;
     /** wall mask only, low saturation (white/gray wall) junction radius, used to force separate colored walls */
     splitWallsNeutralChromaMax?: number;
+    /**
+     * Wall split: raw per-channel BGR Sobel gradient threshold for edge barriers
+     * (0 = disabled). Uses un-normalized 8‑bit Sobel magnitude on each B/G/R
+     * channel (max per pixel, range ≈ 0–1442). Visible wall seams ≈ 120–280,
+     * subtle lighting gradients ≈ 20–80. Default: 160.
+     */
+    splitWallsEdgeBarrierThreshold?: number;
+    /**
+     * Morphological close radius for wall mask holes before component labeling.
+     * Non-wall pixels inside the wall boundary (windows, doors, mask artefacts)
+     * are temporarily filled so the BFS can bridge across them. Default: 3.
+     * Set to 0 to disable.
+     */
+    splitWallsCloseMaskRadius?: number;
+    /** When true, disables automatic texture-based wall splitting (splitWalls). Manual lasso partitioning is used instead. */
+    manualSplitWalls?: boolean;
+    /** wall mask only, max number of manual wall sub-regions defined by lasso */
+    manualSplitWallsMaxCount?: number;
+    /**
+     * Manual lasso: morphological dilation radius (seg pixels) used to merge thin
+     * unassigned wall pockets adjacent to the drawn polygon.
+     */
+    manualSplitWallsGapAbsorbDilatePx?: number;
+    /** When true, lasso mode uses edge-snapping (Sobel gradient + Dijkstra shortest-path). Default: false. */
+    magneticLasso?: boolean;
+    /** After End Lasso, run active contour refinement on each polygon to expand vertices outward toward wall-mask edges. Default: false. */
+    activeContourRefine?: boolean;
 };
 export type PaintConfig = {
     palette?: BgrColor[];
@@ -117,6 +144,32 @@ export type PaintBrushRequiredPayload = {
     regionName: string;
 };
 export type PaintCallbackPayload = PaintSuccessPayload | PaintBrushRequiredPayload;
+/** A lasso polygon defined by user tapping vertices on the wall mask area. Vertices are in normalized image coordinates (0..1). */
+export type LassoPolygon = {
+    id: string;
+    vertices: {
+        x: number;
+        y: number;
+    }[];
+    isClosed: boolean;
+};
+/** Result of converting a lasso polygon into an actual wall sub-region. */
+export type ManualWallPartition = {
+    id: string;
+    regionId: number;
+    regionName: string;
+    vertices: {
+        x: number;
+        y: number;
+    }[];
+    bbox: {
+        x: number;
+        y: number;
+        w: number;
+        h: number;
+    };
+    area: number;
+};
 export type MaskSegmentCanvasRef = {
     reset: () => void;
     swap: (showOrigin?: boolean) => void;
@@ -133,6 +186,20 @@ export type MaskSegmentCanvasRef = {
     getPaintedRegions: () => PaintedRegionRecord[];
     /** Returns the most recent auto-export or save() result, if any. */
     getLastExport?: () => SavePaintResult | null;
+    /** Enter lasso mode — user can tap wall mask area to place polygon vertices. */
+    startLasso: () => void;
+    /** Exit lasso mode, convert all closed lasso polygons into wall-X sub-regions for painting. Returns the partition results. */
+    endLasso: () => ManualWallPartition[];
+    /**
+     * Exit the current lasso editing session without saving regions.
+     * Discards in-progress vertices and closed polygons from this session only;
+     * previously committed manual wall partitions are kept.
+     */
+    cancelLasso: () => void;
+    /** Get the current manual wall partitions (only valid after endLasso has been called). */
+    getManualRegions: () => ManualWallPartition[];
+    /** Delete a lasso polygon by its id. Committed partitions also drop paint on that region. */
+    deleteLasso: (id: string) => void;
 };
 export type MaskSegmentCanvasProps = {
     originUrl?: string;

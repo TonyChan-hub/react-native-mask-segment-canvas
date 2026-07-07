@@ -29,5 +29,23 @@ title: "Props：maskConfig"
 | `splitWallsColorDistSq` | `number` | `1400` | 连通分量色度均值距离平方阈值 |
 | `splitWallsChromaBlurRadius` | `number` | `5` | 保留：色度平滑半径 |
 | `splitWallsNeutralChromaMax` | `number` | `14` | 白/灰墙面低色度半径；与彩色墙面的强制边界 |
+| `splitWallsEdgeBarrierThreshold` | `number` | `160` | 逐通道 BGR Sobel 梯度边缘屏障阈值（0 = 禁用）。可见墙面接缝 ≈ 120–280，细微光照渐变 ≈ 20–80 |
+| `splitWallsCloseMaskRadius` | `number` | `3` | 组件标注前墙面遮罩孔洞（窗户、门）的形态学闭运算半径。设为 0 禁用 |
+| `manualSplitWalls` | `boolean` | `false` | 为 `true` 时禁用自动纹理墙面分割，改为手动套索分区 |
+| `manualSplitWallsMaxCount` | `number` | `8` | 套索定义的最大手动墙面子区域数 |
+| `manualSplitWallsGapAbsorbDilatePx` | `number` | `5` | 形态学膨胀半径（分割像素），用于合并绘制多边形周围的未分配墙面薄缝 |
+| `magneticLasso` | `boolean` | `false` | 为 `true` 时，套索模式使用 Sobel 梯度 + Dijkstra 最短路径进行边缘吸附 |
+| `activeContourRefine` | `boolean` | `false` | 结束套索后，对每个多边形运行主动轮廓精炼，将顶点向外扩展到墙面遮罩边缘 |
 
 启用 `splitWalls` 后，单个 `wall` 区域将被替换为多个 `wall-N` 子区域，每个子区域可独立上色和撤销。旧会话中 `regionName: 'wall'` 的记录无法映射到新的子区域名称，需重新上色。
+
+### 手动墙面分割（套索模式）
+
+当 `manualSplitWalls` 启用时，自动纹理墙面分割被禁用。用户必须使用 **套索（Lasso）** 功能在墙面上手动绘制多边形：
+
+- 调用 `ref.startLasso()` 进入套索模式，然后在墙面区域点击放置多边形顶点。
+- 启用 `magneticLasso` 进行边缘吸附 — 路径将沿图像强边缘走（Sobel 梯度 + Dijkstra 最短路径）。
+- 启用 `activeContourRefine` 在套索完成后自动将顶点向外扩展到墙面遮罩边界。
+- 调用 `ref.endLasso()` 将闭合套索多边形转换为可上色的 `wall-N` 子区域。
+- 自动分割时使用 `splitWallsCloseMaskRadius` 填充墙面遮罩孔洞（窗户、门）。
+- 自动分割时使用 `splitWallsEdgeBarrierThreshold` 阻止 BFS 跨越强边缘（窗框、门框）。

@@ -20,16 +20,29 @@ Accessed via `ref` (type `MaskSegmentCanvasRef`):
 | `resegment` | `() => Promise<void>` | Clear PNG cache and re-segment |
 | `getRegions` | `() => SegmentRegion[]` | Snapshot of current region list |
 | `getPaintedRegions` | `() => PaintedRegionRecord[]` | Snapshot of current paint records |
+| `getLastExport` | `() => SavePaintResult \| null` | Returns the most recent auto-export or `save()` result, if any |
+| `startLasso` | `() => void` | Enter lasso mode — user can tap wall mask area to place polygon vertices |
+| `endLasso` | `() => ManualWallPartition[]` | Exit lasso mode, convert all closed lasso polygons into `wall-X` sub-regions for painting |
+| `cancelLasso` | `() => void` | Exit the current lasso editing session without saving regions |
+| `getManualRegions` | `() => ManualWallPartition[]` | Get the current manual wall partitions (only valid after `endLasso`) |
+| `deleteLasso` | `(id: string) => void` | Delete a lasso polygon by its id. Committed partitions also drop paint on that region |
 
 ## SavePaintResult
 
 `{ filePath, width, height, paintedCount, previewPath? }`
+
+## ManualWallPartition
+
+`{ id, regionId, regionName, vertices, bbox, area }`
+
+Returned by `endLasso()` and `getManualRegions()`. Each partition maps a lasso polygon to a `wall-N` sub-region.
 
 ## Code Examples
 
 ```tsx
 const ref = useRef<MaskSegmentCanvasRef>(null);
 
+// Paint operations
 ref.current?.reset();
 ref.current?.swap();           // toggle
 ref.current?.swap(true);       // force show origin
@@ -47,6 +60,15 @@ await ref.current?.resegment();
 
 const regions = ref.current?.getRegions();
 const painted = ref.current?.getPaintedRegions();
+
+// Lasso operations
+ref.current?.startLasso();                // enter lasso mode
+// ... user taps wall areas to place vertices ...
+const partitions = ref.current?.endLasso();  // convert polygons to wall-N regions
+ref.current?.cancelLasso();               // discard in-progress lasso
+
+const manualRegions = ref.current?.getManualRegions();
+ref.current?.deleteLasso('lasso_1');      // remove a specific polygon
 ```
 
 > `save` depends on the working buffer and pickMap being ready (typically after `interactive`); throws `'Image not ready, cannot save'` if not ready.

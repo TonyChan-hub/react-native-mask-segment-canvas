@@ -277,7 +277,7 @@ function filterOutlineLoops(
   return candidates.filter(loop => loopBoundingArea(loop) >= minKeepArea);
 }
 
-function floodFillComponent(
+export function floodFillComponent(
   binary: Uint8Array,
   cols: number,
   rows: number,

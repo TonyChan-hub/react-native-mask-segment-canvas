@@ -23,6 +23,8 @@ import MaskSegmentCanvas, {
   type PaintConfig,
   type InteractionConfig,
   type SavePaintResult,
+  type LassoPolygon,
+  type ManualWallPartition,
   MASK_SEMANTIC_COLORS,
   BASEBOARD_SEMANTIC_NAME,
   prewarmPngBgrCacheAsync,
@@ -38,6 +40,7 @@ import MaskSegmentCanvas, {
 | 组件 | `MaskSegmentCanvas`（默认导出） |
 | Ref / Props 类型 | `MaskSegmentCanvasRef`, `MaskSegmentCanvasProps` |
 | 会话 / 回调类型 | `MaskSegmentSession`, `PaintCallbackPayload`, `PaintedRegionRecord`, `SavePaintResult` |
+| 套索类型 | `LassoPolygon`, `ManualWallPartition` |
 | Watch 类型 | `MaskSegmentWatchState`, `MaskSegmentWatchDetail` |
 | 配置类型 | `PipelineConfig`, `MaskSegmentConfig`, `PaintConfig`, `InteractionConfig` |
 | 语义颜色 | `MASK_SEMANTIC_COLORS`, `BASEBOARD_SEMANTIC_NAME` |

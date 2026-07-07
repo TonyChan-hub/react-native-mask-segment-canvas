@@ -414,6 +414,10 @@ export type RegionMaskData = {
   cols: number;
   rows: number;
   wallSubLabels?: Uint8Array;
+  /** Semantic index → name table captured at segmentation time (must match labels buffer). */
+  indexToName?: string[];
+  /** Wall semantic index in labels buffer (captured at segmentation time). */
+  wallSemanticIdx?: number;
 };
 
 /** downsample mask path building (screen display does not need segmentation resolution, click still uses full resolution pickMap) */
@@ -421,7 +425,8 @@ export function downsampleMaskDataForPaths(
   maskData: RegionMaskData,
   maxLongSide: number,
 ): RegionMaskData {
-  const { labels, baseboardBinary, cols, rows, wallSubLabels } = maskData;
+  const { labels, baseboardBinary, cols, rows, wallSubLabels, indexToName, wallSemanticIdx } =
+    maskData;
   const longSide = Math.max(cols, rows);
   if (longSide <= maxLongSide) {
     return maskData;
@@ -460,6 +465,8 @@ export function downsampleMaskDataForPaths(
     cols: dstCols,
     rows: dstRows,
     wallSubLabels: outWallSub,
+    indexToName,
+    wallSemanticIdx,
   };
 }
 

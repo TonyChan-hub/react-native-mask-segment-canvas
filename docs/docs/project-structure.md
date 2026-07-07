@@ -17,6 +17,9 @@ MaskSegmentApp/                              # Repo root (npm package react-nati
 │       ├── maskSegmentation.ts
 │       ├── maskSegmentRuntime.ts
 │       ├── maskSemanticPalette.ts
+│       ├── magneticLasso.ts          # Edge-snapping lasso (Sobel + Dijkstra)
+│       ├── activeContour.ts          # Active Contour refinement (snake + balloon)
+│       ├── wallTextureSplit.ts       # Automatic & manual wall texture splitting
 │       └── ...
 ├── example/                                 # ★ Recommended: consumer-side integration demo
 │   ├── App.tsx                              # Full example using only the public API

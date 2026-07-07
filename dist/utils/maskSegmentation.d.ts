@@ -85,6 +85,10 @@ export type RegionMaskData = {
     cols: number;
     rows: number;
     wallSubLabels?: Uint8Array;
+    /** Semantic index → name table captured at segmentation time (must match labels buffer). */
+    indexToName?: string[];
+    /** Wall semantic index in labels buffer (captured at segmentation time). */
+    wallSemanticIdx?: number;
 };
 /** downsample mask path building (screen display does not need segmentation resolution, click still uses full resolution pickMap) */
 export declare function downsampleMaskDataForPaths(maskData: RegionMaskData, maxLongSide: number): RegionMaskData;

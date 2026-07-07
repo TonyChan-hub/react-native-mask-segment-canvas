@@ -24,6 +24,7 @@ import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 
 import MaskSegmentCanvas, {
   type BgrColor,
+  type ManualWallPartition,
   type MaskSegmentCanvasRef,
   type MaskSegmentSession,
   type MaskSegmentWatchState,
@@ -122,6 +123,11 @@ function App(): React.JSX.Element {
   // Demo mode
   const [useCustomColors, setUseCustomColors] = useState(false);
   const [splitWalls, setSplitWalls] = useState(false);
+  const [manualSplitWalls, setManualSplitWalls] = useState(false);
+  const [magneticLasso, setMagneticLasso] = useState(false);
+  const [activeContourRefine, setActiveContourRefine] = useState(false);
+  const [splitEdgeBarrier, setSplitEdgeBarrier] = useState(false);
+  const [isLassoing, setIsLassoing] = useState(false);
   const [pipelinePreset, setPipelinePreset] = useState<PipelinePreset>('medium');
   const [groupIndex, setGroupIndex] = useState(0);
 
@@ -272,6 +278,77 @@ function App(): React.JSX.Element {
     [showToast],
   );
 
+  const handleStartLasso = useCallback(() => {
+    canvasRef.current?.startLasso();
+    setIsLassoing(true);
+    showToast('Lasso mode: tap wall area to place vertices');
+  }, [showToast]);
+
+  const handleEndLasso = useCallback(() => {
+    const parts = canvasRef.current?.endLasso();
+    setIsLassoing(false);
+    if (parts && parts.length > 0) {
+      showToast(`Lasso ended: ${parts.length} wall sub-regions created`);
+      console.log(
+        '[Example] Manual wall partitions:',
+        JSON.stringify(
+          parts.map(p => ({ id: p.id, regionName: p.regionName, area: p.area })),
+          null,
+          2,
+        ),
+      );
+    } else {
+      showToast('Lasso ended (no polygons to convert)');
+    }
+  }, [showToast]);
+
+  const handleCancelLasso = useCallback(() => {
+    canvasRef.current?.cancelLasso();
+    setIsLassoing(false);
+    showToast('Lasso cancelled (regions not saved)');
+  }, [showToast]);
+
+  const handleDeleteLasso = useCallback(() => {
+    const parts = canvasRef.current?.getManualRegions();
+    if (!parts || parts.length === 0) {
+      showToast('No lasso polygons to delete');
+      return;
+    }
+    const last = parts[parts.length - 1];
+    canvasRef.current?.deleteLasso(last.id);
+    showToast(`Deleted lasso: ${last.regionName}`);
+  }, [showToast]);
+
+  const handleGetLassoRegions = useCallback(() => {
+    const parts = canvasRef.current?.getManualRegions();
+    if (!parts || parts.length === 0) {
+      Alert.alert('Manual Regions', 'No manual wall partitions available.');
+      return;
+    }
+    const summary = parts
+      .map(
+        (p: ManualWallPartition) =>
+          `  ${p.regionName}: area=${p.area}, bbox=(${p.bbox.x},${p.bbox.y} ${p.bbox.w}x${p.bbox.h})`,
+      )
+      .join('\n');
+    Alert.alert('Manual Wall Partitions', `${parts.length} regions:\n${summary}`);
+    console.log(
+      '[Example] getManualRegions:',
+      JSON.stringify(
+        parts.map(p => ({
+          id: p.id,
+          regionId: p.regionId,
+          regionName: p.regionName,
+          area: p.area,
+          bbox: p.bbox,
+          vertexCount: p.vertices.length,
+        })),
+        null,
+        2,
+      ),
+    );
+  }, []);
+
   // --------------------------------------------------------------------------
   // render: error / loading / ready
   // --------------------------------------------------------------------------
@@ -381,13 +458,65 @@ function App(): React.JSX.Element {
               (split walls)
             </Text>
           </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.modeChip, manualSplitWalls && styles.modeChipActive]}
+            onPress={() => {
+              setManualSplitWalls(v => !v);
+              if (!manualSplitWalls) {
+                setSplitWalls(false);
+              }
+            }}
+          >
+            <Text style={[styles.modeChipText, manualSplitWalls && styles.modeChipTextActive]}>
+              (manual split)
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.modeChip, magneticLasso && styles.modeChipLassoActive]}
+            onPress={() => {
+              setMagneticLasso(v => !v);
+              if (!magneticLasso) {
+                setManualSplitWalls(true);
+              }
+            }}
+          >
+            <Text style={[styles.modeChipText, magneticLasso && styles.modeChipTextActive]}>
+              (magnetic)
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.modeChip, activeContourRefine && styles.modeChipLassoActive]}
+            onPress={() => {
+              setActiveContourRefine(v => !v);
+              if (!activeContourRefine) {
+                setManualSplitWalls(true);
+              }
+            }}
+          >
+            <Text style={[styles.modeChipText, activeContourRefine && styles.modeChipTextActive]}>
+              (contour)
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.modeChip, splitEdgeBarrier && styles.modeChipActive]}
+            onPress={() => {
+              setSplitEdgeBarrier(v => !v);
+              if (!splitEdgeBarrier) {
+                setSplitWalls(true);
+              }
+            }}
+          >
+            <Text style={[styles.modeChipText, splitEdgeBarrier && styles.modeChipTextActive]}>
+              (edge barrier)
+            </Text>
+          </TouchableOpacity>
         </ScrollView>
       </View>
 
       {/* canvas */}
       <View style={styles.canvasHost}>
         <MaskSegmentCanvas
-          key={`image-group-${groupIndex}-split-${splitWalls ? 1 : 0}`}
+          key={`image-group-${groupIndex}-split-${splitWalls ? 1 : 0}-manual-${manualSplitWalls ? 1 : 0}-magnetic-${magneticLasso ? 1 : 0}-contour-${activeContourRefine ? 1 : 0}-ebarrier-${splitEdgeBarrier ? 1 : 0}`}
           ref={canvasRef}
           style={styles.canvas}
           originUrl={imagePaths.origin}
@@ -399,6 +528,11 @@ function App(): React.JSX.Element {
             ...DEFAULT_MASK_CONFIG,
             maxRegionColors: 6,
             splitWalls,
+            manualSplitWalls,
+            manualSplitWallsMaxCount: 8,
+            magneticLasso,
+            activeContourRefine,
+            splitWallsEdgeBarrierThreshold: splitEdgeBarrier ? 160 : 0,
           }}
           paintConfig={{
             ...DEFAULT_PAINT_CONFIG,
@@ -493,6 +627,46 @@ function App(): React.JSX.Element {
           >
             <Text style={styles.actionBtnText}>Export session</Text>
           </TouchableOpacity>
+
+          <View style={styles.divider} />
+
+          {/* Lasso operations */}
+          <Text style={styles.sectionLabel}>Lasso:</Text>
+          <TouchableOpacity
+            style={[styles.actionBtn, isLassoing && styles.actionBtnLassoActive]}
+            onPress={handleStartLasso}
+            disabled={!isInteractive || !manualSplitWalls || isLassoing}
+          >
+            <Text style={styles.actionBtnText}>Start Lasso</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.actionBtn, styles.actionBtnPrimary]}
+            onPress={handleEndLasso}
+            disabled={!isInteractive || !manualSplitWalls || !isLassoing}
+          >
+            <Text style={styles.actionBtnTextPrimary}>End Lasso</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.actionBtn, styles.actionBtnDanger]}
+            onPress={handleCancelLasso}
+            disabled={!isInteractive || !manualSplitWalls || !isLassoing}
+          >
+            <Text style={styles.actionBtnText}>Cancel Lasso</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.actionBtn, styles.actionBtnDanger]}
+            onPress={handleDeleteLasso}
+            disabled={!isInteractive || !manualSplitWalls}
+          >
+            <Text style={styles.actionBtnText}>Del Lasso</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.actionBtn}
+            onPress={handleGetLassoRegions}
+            disabled={!isInteractive || !manualSplitWalls}
+          >
+            <Text style={styles.actionBtnText}>Get Regions</Text>
+          </TouchableOpacity>
         </ScrollView>
       </View>
 
@@ -584,6 +758,9 @@ const styles = StyleSheet.create({
   },
   modeChipActive: {
     backgroundColor: '#4363D8',
+  },
+  modeChipLassoActive: {
+    backgroundColor: '#00C853',
   },
   modeChipText: {
     fontSize: 11,
@@ -696,6 +873,10 @@ const styles = StyleSheet.create({
   },
   actionBtnDanger: {
     borderColor: '#e88',
+  },
+  actionBtnLassoActive: {
+    backgroundColor: '#FF6B35',
+    borderColor: '#FF6B35',
   },
   actionBtnText: {
     fontSize: 12,
