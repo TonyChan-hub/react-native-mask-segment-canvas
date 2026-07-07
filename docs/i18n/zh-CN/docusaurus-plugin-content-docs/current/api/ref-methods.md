@@ -20,16 +20,29 @@ title: "Ref 方法"
 | `resegment` | `() => Promise<void>` | 清除 PNG 缓存并重新分割 |
 | `getRegions` | `() => SegmentRegion[]` | 当前区域列表快照 |
 | `getPaintedRegions` | `() => PaintedRegionRecord[]` | 当前上色记录快照 |
+| `getLastExport` | `() => SavePaintResult \| null` | 返回最近一次自动导出或 `save()` 的结果（如有） |
+| `startLasso` | `() => void` | 进入套索模式 — 用户可在墙面区域点击放置多边形顶点 |
+| `endLasso` | `() => ManualWallPartition[]` | 退出套索模式，将所有闭合套索多边形转换为可上色的 `wall-X` 子区域 |
+| `cancelLasso` | `() => void` | 退出当前套索编辑会话，不保存区域 |
+| `getManualRegions` | `() => ManualWallPartition[]` | 获取当前手动墙面分区（仅在 `endLasso` 调用后有效） |
+| `deleteLasso` | `(id: string) => void` | 根据 id 删除套索多边形。已提交的分区也会删除该区域上的上色 |
 
 ## SavePaintResult
 
 `{ filePath, width, height, paintedCount, previewPath? }`
+
+## ManualWallPartition
+
+`{ id, regionId, regionName, vertices, bbox, area }`
+
+由 `endLasso()` 和 `getManualRegions()` 返回。每个分区将一个套索多边形映射到一个 `wall-N` 子区域。
 
 ## 代码示例
 
 ```tsx
 const ref = useRef<MaskSegmentCanvasRef>(null);
 
+// 上色操作
 ref.current?.reset();
 ref.current?.swap();           // 切换
 ref.current?.swap(true);       // 强制显示原始图像
@@ -47,6 +60,15 @@ await ref.current?.resegment();
 
 const regions = ref.current?.getRegions();
 const painted = ref.current?.getPaintedRegions();
+
+// 套索操作
+ref.current?.startLasso();                // 进入套索模式
+// ... 用户在墙面区域点击放置顶点 ...
+const partitions = ref.current?.endLasso();  // 将多边形转换为 wall-N 区域
+ref.current?.cancelLasso();               // 丢弃进行中的套索
+
+const manualRegions = ref.current?.getManualRegions();
+ref.current?.deleteLasso('lasso_1');      // 删除指定多边形
 ```
 
 > `save` 依赖于工作缓冲区和 pickMap 就绪（通常在 `interactive` 之后）；如果未就绪则抛出 `'Image not ready, cannot save'`。

@@ -23,7 +23,30 @@ import {
   type RegionMaskData,
   type SegmentRegion,
 } from '../utils/maskSegmentation';
-import { splitWallRegionsByTexture } from '../utils/wallTextureSplit';
+import {
+  splitWallRegionsByTexture,
+  WALL_SUB_LABEL_NONE,
+  buildPickMapAfterWallSplit,
+  dilatePickBuffer1px,
+  patchPickMapForManualWallSplit,
+  absorbSmallWallGapsForLassoPolygons,
+} from '../utils/wallTextureSplit';
+import {
+  buildEnergyMap,
+  findShortestPath,
+  extractCornerPoints,
+  normToEnergyPoint,
+  energyPointsToNorm,
+  isNormPointOnWallMask,
+  filterVerticesToWallMask,
+  buildWallAllowedMask,
+  snapNormPointToWallEdge,
+  snapNormPointToWallCornerOrEdge,
+  resolveLassoWallDragPoint,
+  type EnergyMap,
+  type WallMaskSample,
+} from '../utils/magneticLasso';
+import { refinePolygonToWallEdges } from '../utils/activeContour';
 import {
   clearDerivedImageCache,
   readPngBgrBuffer,
@@ -53,6 +76,8 @@ import {
 } from '../utils/maskSegmentRuntime';
 import type {
   BgrColor,
+  LassoPolygon,
+  ManualWallPartition,
   MaskSegmentCanvasProps,
   MaskSegmentCanvasRef,
   MaskSegmentSession,
@@ -109,6 +134,208 @@ import {
   prepareWorkScaledBgrBuffer,
   timeLog,
 } from '../utils/canvasGeometry';
+
+type LassoVertexHit = {
+  kind: 'open' | 'closed';
+  polyId?: string;
+  vertexIndex: number;
+};
+
+function canvasDistToNormVertex(
+  canvasX: number,
+  canvasY: number,
+  nx: number,
+  ny: number,
+  cw: number,
+  ch: number,
+  imgW: number,
+  imgH: number,
+): number {
+  const r = getContainRect(cw, ch, imgW, imgH);
+  const vx = r.x + nx * r.w;
+  const vy = r.y + ny * r.h;
+  return Math.hypot(canvasX - vx, canvasY - vy);
+}
+
+function isNearOpenLassoFirstVertex(
+  canvasX: number,
+  canvasY: number,
+  cw: number,
+  ch: number,
+  imgW: number,
+  imgH: number,
+  openVerts: { x: number; y: number }[] | null,
+  thresholdPx: number,
+): boolean {
+  if (!openVerts || openVerts.length < 3) {
+    return false;
+  }
+  const first = openVerts[0];
+  return (
+    canvasDistToNormVertex(
+      canvasX, canvasY, first.x, first.y, cw, ch, imgW, imgH,
+    ) < thresholdPx
+  );
+}
+
+function findLassoVertexHit(
+  canvasX: number,
+  canvasY: number,
+  cw: number,
+  ch: number,
+  imgW: number,
+  imgH: number,
+  thresholdPx: number,
+  openVerts: { x: number; y: number }[] | null,
+  closedPolys: Map<string, LassoPolygon>,
+  options?: { openOnly?: boolean },
+): LassoVertexHit | null {
+  const r = getContainRect(cw, ch, imgW, imgH);
+  let bestDist = Infinity;
+  let result: LassoVertexHit | null = null;
+
+  const tryVertex = (
+    nx: number,
+    ny: number,
+    kind: 'open' | 'closed',
+    vertexIndex: number,
+    polyId?: string,
+  ) => {
+    const vx = r.x + nx * r.w;
+    const vy = r.y + ny * r.h;
+    const dist = Math.hypot(canvasX - vx, canvasY - vy);
+    if (dist <= thresholdPx && dist < bestDist) {
+      bestDist = dist;
+      result = { kind, polyId, vertexIndex };
+    }
+  };
+
+  if (openVerts) {
+    for (let i = 0; i < openVerts.length; i++) {
+      tryVertex(openVerts[i].x, openVerts[i].y, 'open', i);
+    }
+  }
+  if (!options?.openOnly) {
+    for (const [polyId, poly] of closedPolys) {
+      for (let i = 0; i < poly.vertices.length; i++) {
+        tryVertex(poly.vertices[i].x, poly.vertices[i].y, 'closed', i, polyId);
+      }
+    }
+  }
+  return result;
+}
+
+function buildWallMaskSampleFromRef(
+  maskData: RegionMaskData | null,
+): WallMaskSample | null {
+  if (!maskData) return null;
+  const semanticColors = getMaskSegmentRuntimeConfig().mask.semanticColors;
+  const wallSemanticIdx =
+    maskData.wallSemanticIdx ??
+    semanticColors.findIndex(sc => sc.name === 'wall');
+  if (wallSemanticIdx < 0) return null;
+  return {
+    labels: maskData.labels,
+    baseboardBinary: maskData.baseboardBinary,
+    cols: maskData.cols,
+    rows: maskData.rows,
+    wallSemanticIdx,
+  };
+}
+
+function isNormPointOnAssignedWall(
+  normX: number,
+  normY: number,
+  maskData: RegionMaskData | null,
+): boolean {
+  if (!maskData?.wallSubLabels || maskData.cols <= 0 || maskData.rows <= 0) {
+    return false;
+  }
+  const { wallSubLabels, cols, rows } = maskData;
+  const cx = Math.min(cols - 1, Math.max(0, Math.floor(normX * cols)));
+  const cy = Math.min(rows - 1, Math.max(0, Math.floor(normY * rows)));
+  return wallSubLabels[cy * cols + cx] !== WALL_SUB_LABEL_NONE;
+}
+
+function isNormPointInCommittedLassoArea(
+  normX: number,
+  normY: number,
+  committedParts: ManualWallPartition[],
+  sessionClosedPolys: Map<string, LassoPolygon>,
+  excludePolyId?: string,
+): boolean {
+  for (const part of committedParts) {
+    if (
+      part.vertices.length >= 3 &&
+      pointInPolygon(normX, normY, part.vertices)
+    ) {
+      return true;
+    }
+  }
+  for (const [polyId, poly] of sessionClosedPolys) {
+    if (polyId === excludePolyId || !poly.isClosed || poly.vertices.length < 3) {
+      continue;
+    }
+    if (pointInPolygon(normX, normY, poly.vertices)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function canPlaceLassoPointAt(
+  normX: number,
+  normY: number,
+  maskData: RegionMaskData | null,
+  wallMask: WallMaskSample | null,
+  committedParts: ManualWallPartition[],
+  sessionPolys: Map<string, LassoPolygon>,
+): boolean {
+  if (!wallMask || !isNormPointOnWallMask(normX, normY, wallMask)) {
+    return false;
+  }
+  if (isNormPointOnAssignedWall(normX, normY, maskData)) {
+    return false;
+  }
+  return !isNormPointInCommittedLassoArea(
+    normX, normY, committedParts, sessionPolys,
+  );
+}
+function lassoPolygonUsesCommittedArea(
+  vertices: { x: number; y: number }[],
+  maskData: RegionMaskData | null,
+  committedParts: ManualWallPartition[],
+  sessionPolys: Map<string, LassoPolygon>,
+  excludePolyId?: string,
+): boolean {
+  for (const v of vertices) {
+    if (isNormPointOnAssignedWall(v.x, v.y, maskData)) {
+      return true;
+    }
+    if (
+      isNormPointInCommittedLassoArea(
+        v.x, v.y, committedParts, sessionPolys, excludePolyId,
+      )
+    ) {
+      return true;
+    }
+  }
+  if (vertices.length >= 3) {
+    const cx = vertices.reduce((s, v) => s + v.x, 0) / vertices.length;
+    const cy = vertices.reduce((s, v) => s + v.y, 0) / vertices.length;
+    if (isNormPointOnAssignedWall(cx, cy, maskData)) {
+      return true;
+    }
+    if (
+      isNormPointInCommittedLassoArea(
+        cx, cy, committedParts, sessionPolys, excludePolyId,
+      )
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
 
 /* ==========================================================================
  * component
@@ -355,6 +582,7 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
   );
   const paintedRegionsRef = useRef<Map<number, BgrColor>>(new Map());
   const [paintHistory, setPaintHistory] = useState<number[]>([]);
+  const paintHistoryRef = useRef<number[]>([]);
 
   // Seed the ref with the initial empty map so early reads (before any paint effect)
   // are consistent.
@@ -389,6 +617,9 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
   useEffect(() => {
     paintedRegionsRef.current = paintedRegions;
   }, [paintedRegions]);
+  useEffect(() => {
+    paintHistoryRef.current = paintHistory;
+  }, [paintHistory]);
 
   // Cached export from the most recent auto-export or save() — keyed by painted fingerprint.
   const lastExportCacheRef = useRef<{ fingerprint: string; result: SavePaintResult } | null>(null);
@@ -472,8 +703,44 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
   // Ref to the latest containRect (the actual placed photo rect inside the viewport).
   const containRectRef = useRef<ContainRect | null>(null);
 
+  // ── Manual Lasso State ────────────────────────────────────────────────
+  const [isLassoActive, setIsLassoActive] = useState(false);
+  const isLassoActiveRef = useRef(false);
+  const [lassoPolygons, setLassoPolygons] = useState<Map<string, LassoPolygon>>(new Map());
+  const lassoPolygonsRef = useRef<Map<string, LassoPolygon>>(new Map());
+  const [currentLassoVertices, setCurrentLassoVertices] = useState<{ x: number; y: number }[] | null>(null);
+  const currentLassoVerticesRef = useRef<{ x: number; y: number }[] | null>(null);
+  const [manualWallRegions, setManualWallRegions] = useState<ManualWallPartition[]>([]);
+  const manualWallRegionsRef = useRef<ManualWallPartition[]>([]);
+  const lassoIdCounterRef = useRef(0);
+  const LASSO_COLOR = '#FF6B35';
+  const MAGNETIC_LASSO_COLOR = '#00C853';
+  const LASSO_CLOSE_THRESHOLD_PX = 32;
+  const LASSO_VERTEX_HIT_PX = 20;
+  const LASSO_DRAG_ACTIVATE_PX = 10;
+  const LASSO_MIN_VERTEX_SPACING_PX = 14;
+  const LASSO_EDGE_SNAP_SEG_PX = 12;
+  const LASSO_TAP_SNAP_SEG_PX = 20;
+  const LASSO_TAP_CANCEL_PX = 8;
+
+  const lassoDragRef = useRef<LassoVertexHit | null>(null);
+  const lassoVertexCandidateRef = useRef<LassoVertexHit | null>(null);
+  const lassoDragMovedRef = useRef(false);
+  const lassoPendingTapRef = useRef<{ x: number; y: number } | null>(null);
+  const [lassoDragVertex, setLassoDragVertex] = useState<LassoVertexHit | null>(
+    null,
+  );
+
+  const [energyMap, setEnergyMap] = useState<EnergyMap | null>(null);
+  const energyMapRef = useRef<EnergyMap | null>(null);
+
   useEffect(() => { zoomScaleRef.current = zoomScale; }, [zoomScale]);
   useEffect(() => { panOffsetRef.current = panOffset; }, [panOffset]);
+  useEffect(() => { isLassoActiveRef.current = isLassoActive; }, [isLassoActive]);
+  useEffect(() => { lassoPolygonsRef.current = lassoPolygons; }, [lassoPolygons]);
+  useEffect(() => { currentLassoVerticesRef.current = currentLassoVertices; }, [currentLassoVertices]);
+  useEffect(() => { manualWallRegionsRef.current = manualWallRegions; }, [manualWallRegions]);
+  useEffect(() => { energyMapRef.current = energyMap; }, [energyMap]);
 
   const handleCanvasWrapLayout = useCallback((width: number, height: number) => {
     if (width <= 0 || height <= 0) {
@@ -511,6 +778,8 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
   const lastSegmentKeyRef = useRef('');
   const segmentInFlightKeyRef = useRef('');
   const maskPathsContainRectRef = useRef<ContainRect | null>(null);
+  const lastOutlineRegionKeyRef = useRef('');
+  const [regionPickGeneration, setRegionPickGeneration] = useState(0);
 
   useEffect(() => {
     paintResourceLayersRef.current = paintResourceLayers;
@@ -578,7 +847,13 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
     );
     paintColorMapSkImgRef.current = map;
     return map;
-  }, [paintedRegions, paintResourcesReady, segmentsReady, getMaskRuntimeRevision()]);
+  }, [
+    paintedRegions,
+    paintResourcesReady,
+    segmentsReady,
+    regionPickGeneration,
+    getMaskRuntimeRevision(),
+  ]);
 
   const paintedRegionConfigRef = useRef(
     new Map<number, Record<string, unknown>>(),
@@ -624,6 +899,17 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
         initFlashTimerRef.current = null;
       }
       hasAppliedInitialSessionRef.current = false;
+      // Reset lasso state on new segmentation
+      setIsLassoActive(false);
+      isLassoActiveRef.current = false;
+      setLassoPolygons(new Map());
+      lassoPolygonsRef.current = new Map();
+      setCurrentLassoVertices(null);
+      currentLassoVerticesRef.current = null;
+      setManualWallRegions([]);
+      manualWallRegionsRef.current = [];
+      setEnergyMap(null);
+      energyMapRef.current = null;
       lastExportCacheRef.current = null;
       if (autoExportDebounceRef.current) {
         clearTimeout(autoExportDebounceRef.current);
@@ -761,7 +1047,8 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
         }
 
         let segmentResult = segmentResultRaw;
-        if (getMaskSegmentRuntimeConfig().mask.splitWalls) {
+        const runtimeMaskCfg = getMaskSegmentRuntimeConfig().mask;
+        if (runtimeMaskCfg.splitWalls && !runtimeMaskCfg.manualSplitWalls) {
           segmentResult = splitWallRegionsByTexture(
             segmentResult,
             workScaled.buffer,
@@ -788,12 +1075,18 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
 
         regionsRef.current = finalRegions;
         regionPickRef.current = segmentResult.pickMap;
+        const segSemanticColors =
+          getMaskSegmentRuntimeConfig().mask.semanticColors;
+        const segIndexToName = segSemanticColors.map(sc => sc.name);
+        const segWallSemanticIdx = segIndexToName.indexOf('wall');
         regionMaskDataRef.current = {
           labels: segmentResult.labels,
           baseboardBinary: segmentResult.baseboardBinary,
           cols: segmentResult.segCols,
           rows: segmentResult.segRows,
           wallSubLabels: segmentResult.wallSubLabels,
+          indexToName: segIndexToName,
+          wallSemanticIdx: segWallSemanticIdx >= 0 ? segWallSemanticIdx : undefined,
         };
         baseboardPickMaskRef.current = null;
         kickRegionIdRef.current =
@@ -1297,26 +1590,23 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
         return null;
       }
 
+      const isValidRegionId = (id: number | null): id is number =>
+        id != null && regionsRef.current.some(r => r.id === id);
+
       const regionPick = regionPickRef.current;
+      const pickRadius = strict
+        ? 0
+        : getMaskSegmentRuntimeConfig().interaction.pickMapSearchRadiusPx;
+
       if (regionPick) {
-        const pickHit = lookupRegionFromPickMap(
-          norm.x,
-          norm.y,
-          regionPick,
-          strict
-            ? 0
-            : getMaskSegmentRuntimeConfig().interaction.pickMapSearchRadiusPx,
-        );
-        if (pickHit != null) {
-          return pickHit;
+        const centerHit = lookupRegionFromPickMap(norm.x, norm.y, regionPick, 0);
+        if (isValidRegionId(centerHit)) {
+          return centerHit;
         }
         if (strict) {
           return null;
         }
       }
-
-      const pick = maskPickRef.current;
-      const kickId = kickRegionIdRef.current;
 
       if (!strict) {
         const polygonHit = resolveRegionHit(regionsRef.current, norm.x, norm.y);
@@ -1324,6 +1614,21 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
           return polygonHit;
         }
       }
+
+      if (regionPick && !strict && pickRadius > 0) {
+        const radiusHit = lookupRegionFromPickMap(
+          norm.x,
+          norm.y,
+          regionPick,
+          pickRadius,
+        );
+        if (isValidRegionId(radiusHit)) {
+          return radiusHit;
+        }
+      }
+
+      const pick = maskPickRef.current;
+      const kickId = kickRegionIdRef.current;
 
       if (pick && kickId != null) {
         const pickMask = baseboardPickMaskRef.current;
@@ -1620,6 +1925,599 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
       resegment: clearCacheAndResegment,
       getRegions: () => [...regionsRef.current],
       getPaintedRegions: () => buildPaintedRecords(),
+      startLasso: () => {
+        setLassoPolygons(new Map());
+        lassoPolygonsRef.current = new Map();
+        setCurrentLassoVertices(null);
+        currentLassoVerticesRef.current = null;
+        // Keep manualWallRegions / existing wall-N partitions — each session adds more.
+        setIsLassoActive(true);
+        isLassoActiveRef.current = true;
+
+        // Precompute energy map for magnetic lasso
+        const isMagnetic = getMaskSegmentRuntimeConfig().mask.magneticLasso;
+        if (isMagnetic && getMaskSegmentRuntimeConfig().mask.manualSplitWalls) {
+          const work = workBufferRef.current;
+          if (work && work.cols > 0 && work.rows > 0) {
+            const maskData = regionMaskDataRef.current;
+            const semanticColors = getMaskSegmentRuntimeConfig().mask.semanticColors;
+            const wallSemanticIdx =
+              maskData?.wallSemanticIdx ??
+              semanticColors.findIndex(sc => sc.name === 'wall');
+            let allowedMask: Uint8Array | null = null;
+            if (
+              maskData &&
+              wallSemanticIdx >= 0 &&
+              maskData.cols === work.cols &&
+              maskData.rows === work.rows
+            ) {
+              allowedMask = buildWallAllowedMask(
+                maskData.labels,
+                maskData.baseboardBinary,
+                wallSemanticIdx,
+              );
+            }
+            const map = buildEnergyMap(
+              work.buffer,
+              work.cols,
+              work.rows,
+              256,
+              allowedMask,
+            );
+            setEnergyMap(map);
+            energyMapRef.current = map;
+          }
+        }
+      },
+      cancelLasso: () => {
+        setIsLassoActive(false);
+        isLassoActiveRef.current = false;
+        setCurrentLassoVertices(null);
+        currentLassoVerticesRef.current = null;
+        setLassoPolygons(new Map());
+        lassoPolygonsRef.current = new Map();
+        setEnergyMap(null);
+        energyMapRef.current = null;
+        lassoDragRef.current = null;
+        lassoPendingTapRef.current = null;
+        lassoVertexCandidateRef.current = null;
+        lassoDragMovedRef.current = false;
+        setLassoDragVertex(null);
+      },
+      endLasso: () => {
+        const maskDataEarly = regionMaskDataRef.current;
+        const semanticColorsEarly = getMaskSegmentRuntimeConfig().mask.semanticColors;
+        const wallIdxEarly =
+          maskDataEarly?.wallSemanticIdx ??
+          semanticColorsEarly.findIndex(sc => sc.name === 'wall');
+        const wallMaskEarly: WallMaskSample | null =
+          maskDataEarly && wallIdxEarly >= 0
+            ? {
+                labels: maskDataEarly.labels,
+                baseboardBinary: maskDataEarly.baseboardBinary,
+                cols: maskDataEarly.cols,
+                rows: maskDataEarly.rows,
+                wallSemanticIdx: wallIdxEarly,
+              }
+            : null;
+        const hasEnoughWallVerts = (verts: { x: number; y: number }[]) => {
+          if (verts.length < 3) return false;
+          if (!wallMaskEarly) return true;
+          return filterVerticesToWallMask(verts, wallMaskEarly).length >= 3;
+        };
+
+        // 1. Finalize open polygon if possible (keep raw vertices for rasterization)
+        const cur = currentLassoVerticesRef.current;
+        if (cur && hasEnoughWallVerts(cur)) {
+          const id = `lasso_${++lassoIdCounterRef.current}`;
+          const polygon: LassoPolygon = {
+            id,
+            vertices: [...cur],
+            isClosed: true,
+          };
+          const nextPolys = new Map(lassoPolygonsRef.current);
+          nextPolys.set(id, polygon);
+          lassoPolygonsRef.current = nextPolys;
+          setLassoPolygons(nextPolys);
+          setCurrentLassoVertices(null);
+          currentLassoVerticesRef.current = null;
+        }
+
+        // 2. Collect closed polygons
+        const polys = new Map(
+          [...lassoPolygonsRef.current.entries()].filter(([, poly]) =>
+            hasEnoughWallVerts(poly.vertices),
+          ),
+        );
+        if (polys.size === 0) {
+          return [...manualWallRegionsRef.current];
+        }
+
+        // 4. Get necessary data
+        const regions = regionsRef.current;
+        const wallTemplate =
+          regions.find(r => r.name === 'wall') ??
+          regions.find(r => /^wall-\d+$/.test(r.name));
+        if (!wallTemplate) {
+          return [...manualWallRegionsRef.current];
+        }
+
+        const wallHex = wallTemplate.hex;
+        const wallColor = { ...wallTemplate.color };
+
+        const maskData = regionMaskDataRef.current;
+        if (!maskData) {
+          return [...manualWallRegionsRef.current];
+        }
+
+        const { labels, baseboardBinary, cols: segW, rows: segH } = maskData;
+        const segPixelCount = segW * segH;
+
+        // 3. Active contour refinement: expand polygon vertices outward toward wall boundary
+        const activeContourRefine = getMaskSegmentRuntimeConfig().mask.activeContourRefine;
+        if (activeContourRefine && wallMaskEarly) {
+          for (const [, poly] of polys) {
+            poly.vertices = refinePolygonToWallEdges(poly.vertices, wallMaskEarly);
+          }
+        }
+
+        // Find wall semantic index in the label buffer (prefer value captured at segmentation).
+        const semanticColors = getMaskSegmentRuntimeConfig().mask.semanticColors;
+        const polyEntries = [...polys.entries()];
+        const polyVertsList = polyEntries.map(([, poly]) => poly.vertices);
+
+        const inferDominantLabelInPolys = (): number => {
+          const labelCounts = new Map<number, number>();
+          for (let y = 0; y < segH; y++) {
+            for (let x = 0; x < segW; x++) {
+              const normX = (x + 0.5) / segW;
+              const normY = (y + 0.5) / segH;
+              let inside = false;
+              for (const verts of polyVertsList) {
+                if (pointInPolygon(normX, normY, verts)) {
+                  inside = true;
+                  break;
+                }
+              }
+              if (!inside) continue;
+              const label = labels[y * segW + x];
+              if (label === 255) continue;
+              labelCounts.set(label, (labelCounts.get(label) ?? 0) + 1);
+            }
+          }
+          let bestLabel = -1;
+          let bestCount = 0;
+          for (const [label, count] of labelCounts) {
+            if (count > bestCount) {
+              bestLabel = label;
+              bestCount = count;
+            }
+          }
+          return bestLabel;
+        };
+
+        const indexToName =
+          maskData.indexToName ?? semanticColors.map(sc => sc.name);
+
+        let wallSemanticIdx =
+          maskData.wallSemanticIdx ??
+          semanticColors.findIndex(sc => sc.name === 'wall');
+        if (wallSemanticIdx < 0) {
+          const inferred = inferDominantLabelInPolys();
+          if (inferred >= 0 && indexToName[inferred] === 'wall') {
+            wallSemanticIdx = inferred;
+          }
+        }
+        if (wallSemanticIdx < 0) {
+          return [...manualWallRegionsRef.current];
+        }
+
+        const rasterizeNewWallAreas = (
+          wallIdx: number,
+          assignedLabels: Uint8Array,
+        ) => {
+          areas.fill(0);
+          for (const b of bboxes) {
+            b.x = segW;
+            b.y = segH;
+            b.w = 0;
+            b.h = 0;
+          }
+
+          for (let y = 0; y < segH; y++) {
+            for (let x = 0; x < segW; x++) {
+              const i = y * segW + x;
+              if (labels[i] !== wallIdx) continue;
+              if (baseboardBinary[i]) continue;
+              // Skip wall pixels already assigned to a previous lasso session.
+              if (assignedLabels[i] !== WALL_SUB_LABEL_NONE) continue;
+
+              const normX = (x + 0.5) / segW;
+              const normY = (y + 0.5) / segH;
+
+              for (let pi = 0; pi < polyEntries.length; pi++) {
+                const poly = polyEntries[pi][1];
+                if (pointInPolygon(normX, normY, poly.vertices)) {
+                  newPolyLabels[i] = pi;
+                  areas[pi]++;
+                  const b = bboxes[pi];
+                  if (x < b.x) b.x = x;
+                  if (y < b.y) b.y = y;
+                  const right = x + 1;
+                  const bottom = y + 1;
+                  if (right > b.x + b.w) b.w = right - b.x;
+                  if (bottom > b.y + b.h) b.h = bottom - b.y;
+                  break;
+                }
+              }
+            }
+          }
+        };
+
+        // 5. Preserve existing wall sub-labels; rasterize only NEW unassigned wall pixels.
+        const remappedWallSubLabels = new Uint8Array(segPixelCount);
+        if (
+          maskData.wallSubLabels &&
+          maskData.wallSubLabels.length === segPixelCount
+        ) {
+          remappedWallSubLabels.set(maskData.wallSubLabels);
+        } else {
+          remappedWallSubLabels.fill(WALL_SUB_LABEL_NONE);
+        }
+
+        let maxExistingSub = -1;
+        for (let i = 0; i < segPixelCount; i++) {
+          const sub = remappedWallSubLabels[i];
+          if (sub !== WALL_SUB_LABEL_NONE) {
+            maxExistingSub = Math.max(maxExistingSub, sub);
+          }
+        }
+
+        const existingWallRegions = regions.filter(r =>
+          /^wall-\d+$/.test(r.name),
+        );
+        let maxWallNum = 0;
+        for (const reg of existingWallRegions) {
+          const m = /^wall-(\d+)$/.exec(reg.name);
+          if (m) {
+            maxWallNum = Math.max(maxWallNum, Number(m[1]));
+          }
+        }
+
+        const newPolyLabels = new Uint8Array(segPixelCount);
+        newPolyLabels.fill(WALL_SUB_LABEL_NONE);
+        const areas: number[] = new Array(polyEntries.length).fill(0);
+        const bboxes = polyEntries.map(() => ({
+          x: segW, y: segH, w: 0, h: 0,
+        }));
+
+        rasterizeNewWallAreas(wallSemanticIdx, remappedWallSubLabels);
+
+        // Retry with inferred label if name-based index matched no new wall pixels
+        if (areas.every(a => a === 0)) {
+          const inferred = inferDominantLabelInPolys();
+          if (
+            inferred >= 0 &&
+            indexToName[inferred] === 'wall' &&
+            inferred !== wallSemanticIdx
+          ) {
+            wallSemanticIdx = inferred;
+            newPolyLabels.fill(WALL_SUB_LABEL_NONE);
+            rasterizeNewWallAreas(wallSemanticIdx, remappedWallSubLabels);
+          }
+        }
+
+        const gapAbsorbDilatePx =
+          getMaskSegmentRuntimeConfig().mask.manualSplitWallsGapAbsorbDilatePx ??
+          5;
+        if (gapAbsorbDilatePx > 0 && polyEntries.length > 0) {
+          absorbSmallWallGapsForLassoPolygons(
+            newPolyLabels,
+            polyEntries.length,
+            areas,
+            bboxes,
+            labels,
+            baseboardBinary,
+            wallSemanticIdx,
+            remappedWallSubLabels,
+            segW,
+            segH,
+            gapAbsorbDilatePx,
+          );
+        }
+
+        // 6. Keep new polygons that captured unassigned wall pixels
+        const maxCount =
+          getMaskSegmentRuntimeConfig().mask.manualSplitWallsMaxCount ?? 8;
+        const slotsForNew = Math.max(0, maxCount - existingWallRegions.length);
+        const keptPolyIndices = areas
+          .map((area, idx) => ({ area, idx }))
+          .filter(entry => entry.area > 0)
+          .sort((a, b) => b.area - a.area)
+          .slice(0, slotsForNew)
+          .map(entry => entry.idx);
+
+        if (keptPolyIndices.length === 0) {
+          return [...manualWallRegionsRef.current];
+        }
+
+        for (let i = 0; i < segPixelCount; i++) {
+          const polyIdx = newPolyLabels[i];
+          if (polyIdx === WALL_SUB_LABEL_NONE) continue;
+          const rank = keptPolyIndices.indexOf(polyIdx);
+          if (rank >= 0) {
+            remappedWallSubLabels[i] = maxExistingSub + 1 + rank;
+          }
+        }
+
+        const nonWallRegions = regions.filter(
+          r => r.name !== 'wall' && !/^wall-\d+$/.test(r.name),
+        );
+        const maxRegionId = regions.reduce(
+          (max, r) => Math.max(max, r.id),
+          -1,
+        );
+        const newWallSubRegions: SegmentRegion[] = keptPolyIndices.map(
+          (origIdx, rank) => {
+            const [, poly] = polyEntries[origIdx];
+            const b = bboxes[origIdx];
+            return {
+              id: maxRegionId + 1 + rank,
+              name: `wall-${maxWallNum + rank + 1}`,
+              hex: wallHex,
+              color: wallColor,
+              polygons: [poly.vertices.map(v => ({ x: v.x, y: v.y }))],
+              outlinePolygons: [poly.vertices.map(v => ({ x: v.x, y: v.y }))],
+              bbox: {
+                x: b.x / segW,
+                y: b.y / segH,
+                w: b.w / segW,
+                h: b.h / segH,
+              },
+              area: areas[origIdx],
+            };
+          },
+        );
+
+        // Keep non-wall + existing wall-N; append new wall-(N+1)…
+        const mergedRegions = [
+          ...nonWallRegions,
+          ...existingWallRegions,
+          ...newWallSubRegions,
+        ];
+
+        // 8. Patch wall pixels in the existing pick map (non-wall codes stay untouched).
+        const nameToId = new Map(mergedRegions.map(reg => [reg.name, reg.id]));
+        const existingPick = regionPickRef.current;
+        let newPickBuffer: Uint8Array;
+        if (
+          existingPick &&
+          existingPick.cols === segW &&
+          existingPick.rows === segH &&
+          existingPick.buffer.length === segPixelCount
+        ) {
+          newPickBuffer = patchPickMapForManualWallSplit(
+            existingPick.buffer,
+            labels,
+            baseboardBinary,
+            wallSemanticIdx,
+            remappedWallSubLabels,
+            nameToId,
+            segW,
+            segH,
+          );
+        } else {
+          const pickRaw = buildPickMapAfterWallSplit(
+            labels,
+            baseboardBinary,
+            wallSemanticIdx,
+            remappedWallSubLabels,
+            indexToName,
+            nameToId,
+            segW,
+            segH,
+          );
+          newPickBuffer = dilatePickBuffer1px(pickRaw, segW, segH);
+        }
+
+        // Drop only the monolithic "wall" paint; keep existing wall-N paints.
+        const keptPainted = new Map<number, BgrColor>();
+        for (const [regionId, color] of paintedRegionsRef.current) {
+          const reg = regions.find(r => r.id === regionId);
+          if (!reg) continue;
+          if (reg.name === 'wall') {
+            paintedRegionConfigRef.current.delete(regionId);
+            continue;
+          }
+          keptPainted.set(regionId, color);
+        }
+        paintedRegionsRef.current = keptPainted;
+
+        const keptHistory = paintHistoryRef.current.filter(regionId => {
+          const reg = regions.find(r => r.id === regionId);
+          return reg != null && reg.name !== 'wall';
+        });
+
+        // 9. Update refs and state
+        regionsRef.current = mergedRegions;
+        regionPickRef.current = { buffer: newPickBuffer, cols: segW, rows: segH };
+        kickRegionIdRef.current =
+          mergedRegions.find(reg => reg.thinStrip)?.id ?? null;
+        regionMaskDataRef.current = {
+          labels: maskData.labels,
+          baseboardBinary: maskData.baseboardBinary,
+          cols: segW,
+          rows: segH,
+          wallSubLabels: remappedWallSubLabels,
+          indexToName,
+          wallSemanticIdx,
+        };
+
+        // Keep paint preview in sync with the rebuilt pick buffer (same pick used by shader).
+        if (keptPainted.size > 0) {
+          paintColorMapSkImgRef.current?.dispose();
+          paintColorMapSkImgRef.current = createPaintColorMapForPaint(
+            newPickBuffer,
+            segW,
+            segH,
+            keptPainted,
+          );
+        }
+
+        // 10. Build ManualWallPartition results (append to previous sessions)
+        const wallRegionNameToRegion = new Map(
+          mergedRegions
+            .filter(r => /^wall-\d+$/.test(r.name))
+            .map(r => [r.name, r] as const),
+        );
+        const newManualParts: ManualWallPartition[] = keptPolyIndices
+          .map((origIdx, rank) => {
+            const [polyId, poly] = polyEntries[origIdx];
+            const regionName = `wall-${maxWallNum + rank + 1}`;
+            const segRegion = wallRegionNameToRegion.get(regionName);
+            if (!segRegion) return null;
+            return {
+              id: polyId,
+              regionId: segRegion.id,
+              regionName: segRegion.name,
+              vertices: poly.vertices,
+              bbox: segRegion.bbox,
+              area: segRegion.area,
+            };
+          })
+          .filter((p): p is ManualWallPartition => p != null);
+
+        const allManualParts = [
+          ...manualWallRegionsRef.current,
+          ...newManualParts,
+        ];
+
+        setManualWallRegions(allManualParts);
+        manualWallRegionsRef.current = allManualParts;
+        setRegionPalette(mergedRegions);
+        setRegionCount(mergedRegions.length);
+        setPaintedRegions(keptPainted);
+        setPaintHistory(keptHistory);
+        setRegionPickGeneration(g => g + 1);
+        // Force outline path rebuild (region IDs/names changed even if canvas layout did not).
+        maskPathsContainRectRef.current = null;
+        lastOutlineRegionKeyRef.current = '';
+
+        // Exit lasso mode only after a successful commit
+        setIsLassoActive(false);
+        isLassoActiveRef.current = false;
+        setCurrentLassoVertices(null);
+        currentLassoVerticesRef.current = null;
+        setEnergyMap(null);
+        energyMapRef.current = null;
+        setLassoPolygons(new Map());
+        lassoPolygonsRef.current = new Map();
+
+        return allManualParts;
+      },
+      getManualRegions: () => [...manualWallRegionsRef.current],
+      deleteLasso: (id: string) => {
+        if (lassoPolygonsRef.current.has(id)) {
+          setLassoPolygons(prev => {
+            const next = new Map(prev);
+            next.delete(id);
+            lassoPolygonsRef.current = next;
+            return next;
+          });
+          return;
+        }
+
+        const part = manualWallRegionsRef.current.find(p => p.id === id);
+        if (!part) {
+          return;
+        }
+
+        const regions = regionsRef.current;
+        const maskData = regionMaskDataRef.current;
+        const pick = regionPickRef.current;
+        if (!maskData || !pick) {
+          return;
+        }
+
+        const subMatch = /^wall-(\d+)$/.exec(part.regionName);
+        if (!subMatch) {
+          return;
+        }
+        const subToDelete = Number(subMatch[1]) - 1;
+
+        const { labels, baseboardBinary, cols: segW, rows: segH } = maskData;
+        const segPixelCount = segW * segH;
+        const semanticColors = getMaskSegmentRuntimeConfig().mask.semanticColors;
+        const indexToName =
+          maskData.indexToName ?? semanticColors.map(sc => sc.name);
+        let wallSemanticIdx =
+          maskData.wallSemanticIdx ??
+          semanticColors.findIndex(sc => sc.name === 'wall');
+        if (wallSemanticIdx < 0) {
+          return;
+        }
+
+        const wallSubLabels = new Uint8Array(
+          maskData.wallSubLabels?.length === segPixelCount
+            ? maskData.wallSubLabels
+            : new Uint8Array(segPixelCount).fill(WALL_SUB_LABEL_NONE),
+        );
+        for (let i = 0; i < segPixelCount; i++) {
+          if (wallSubLabels[i] === subToDelete) {
+            wallSubLabels[i] = WALL_SUB_LABEL_NONE;
+          }
+        }
+
+        const mergedRegions = regions.filter(r => r.id !== part.regionId);
+        const nameToId = new Map(mergedRegions.map(reg => [reg.name, reg.id]));
+
+        const newPickBuffer = patchPickMapForManualWallSplit(
+          pick.buffer,
+          labels,
+          baseboardBinary,
+          wallSemanticIdx,
+          wallSubLabels,
+          nameToId,
+          segW,
+          segH,
+        );
+
+        const keptPainted = new Map(paintedRegionsRef.current);
+        keptPainted.delete(part.regionId);
+        paintedRegionConfigRef.current.delete(part.regionId);
+        paintedRegionsRef.current = keptPainted;
+
+        const keptHistory = paintHistoryRef.current.filter(
+          regionId => regionId !== part.regionId,
+        );
+        paintHistoryRef.current = keptHistory;
+
+        regionsRef.current = mergedRegions;
+        regionPickRef.current = { buffer: newPickBuffer, cols: segW, rows: segH };
+        regionMaskDataRef.current = {
+          labels: maskData.labels,
+          baseboardBinary: maskData.baseboardBinary,
+          cols: segW,
+          rows: segH,
+          wallSubLabels,
+          indexToName,
+          wallSemanticIdx,
+        };
+
+        const allManualParts = manualWallRegionsRef.current.filter(
+          p => p.id !== id,
+        );
+        manualWallRegionsRef.current = allManualParts;
+
+        setManualWallRegions(allManualParts);
+        setRegionPalette(mergedRegions);
+        setRegionCount(mergedRegions.length);
+        setPaintedRegions(keptPainted);
+        setPaintHistory(keptHistory);
+        setRegionPickGeneration(g => g + 1);
+        maskPathsContainRectRef.current = null;
+        lastOutlineRegionKeyRef.current = '';
+      },
     }),
     [
       undoSelection,
@@ -1656,7 +2554,11 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
       return;
     }
 
+    const regionLayoutKey = regionPalette
+      .map(r => `${r.id}:${r.name}`)
+      .join('|');
     if (
+      lastOutlineRegionKeyRef.current === regionLayoutKey &&
       maskPathsContainRectRef.current &&
       rectsEqual(maskPathsContainRectRef.current, containRect)
     ) {
@@ -1675,6 +2577,7 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
     );
     
     maskPathsContainRectRef.current = containRect;
+    lastOutlineRegionKeyRef.current = regionLayoutKey;
     setRegionOutlinePaths(outlines);
     setMaskPathsReady(true);
     maskPathsReadyRef.current = true;
@@ -1821,6 +2724,190 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
               heldRegionId != null &&
               !paintedRegions.has(heldRegionId) &&
               renderRegionMaskOverlay(heldRegionId, 'hold-overlay')}
+
+            {/* Lasso polygon rendering */}
+            {isLassoActive && imageSize && containRect && (() => {
+              const elements: React.ReactNode[] = [];
+              const imgW = imageSize.w;
+              const imgH = imageSize.h;
+              const r = containRect;
+
+              // Helper: normalized → canvas
+              const n2c = (nx: number, ny: number) => ({
+                x: r.x + nx * r.w,
+                y: r.y + ny * r.h,
+              });
+
+              const lassoRenderColor = energyMapRef.current ? MAGNETIC_LASSO_COLOR : LASSO_COLOR;
+
+              const maskDataForRender = regionMaskDataRef.current;
+              const wallIdxForRender =
+                maskDataForRender?.wallSemanticIdx ??
+                getMaskSegmentRuntimeConfig()
+                  .mask.semanticColors.findIndex(sc => sc.name === 'wall');
+              const wallMaskForRender: WallMaskSample | null =
+                maskDataForRender && wallIdxForRender >= 0
+                  ? {
+                      labels: maskDataForRender.labels,
+                      baseboardBinary: maskDataForRender.baseboardBinary,
+                      cols: maskDataForRender.cols,
+                      rows: maskDataForRender.rows,
+                      wallSemanticIdx: wallIdxForRender,
+                    }
+                  : null;
+              const visibleWallVerts = (verts: { x: number; y: number }[]) =>
+                wallMaskForRender
+                  ? filterVerticesToWallMask(verts, wallMaskForRender)
+                  : verts;
+
+              // Render finished (closed) lasso polygons
+              for (const [, poly] of lassoPolygons) {
+                const polyVerts = visibleWallVerts(poly.vertices);
+                if (!poly.isClosed || polyVerts.length < 3) continue;
+                const path = Skia.Path.Make();
+                const v0 = n2c(polyVerts[0].x, polyVerts[0].y);
+                path.moveTo(v0.x, v0.y);
+                for (let i = 1; i < polyVerts.length; i++) {
+                  const vt = n2c(polyVerts[i].x, polyVerts[i].y);
+                  path.lineTo(vt.x, vt.y);
+                }
+                path.close();
+
+                elements.push(
+                  <Path
+                    key={`lasso-poly-${poly.id}`}
+                    path={path}
+                    color={lassoRenderColor}
+                    style="stroke"
+                    strokeWidth={2.5}
+                    strokeJoin="round"
+                    antiAlias
+                  >
+                    <DashPathEffect intervals={[10, 6]} />
+                  </Path>,
+                );
+
+                // Vertex dots
+                for (let i = 0; i < polyVerts.length; i++) {
+                  const vc = n2c(polyVerts[i].x, polyVerts[i].y);
+                  const isDragging =
+                    lassoDragVertex?.kind === 'closed' &&
+                    lassoDragVertex.polyId === poly.id &&
+                    lassoDragVertex.vertexIndex === i;
+                  const dotR = isDragging ? 7 : 4;
+                  const dot = Skia.Path.Make();
+                  const dotRect = Skia.XYWHRect(
+                    vc.x - dotR,
+                    vc.y - dotR,
+                    dotR * 2,
+                    dotR * 2,
+                  );
+                  dot.addOval(dotRect);
+                  elements.push(
+                    <Path
+                      key={`lasso-dot-${poly.id}-${i}`}
+                      path={dot}
+                      color={isDragging ? '#FFFFFF' : lassoRenderColor}
+                      style="fill"
+                      antiAlias
+                    />,
+                  );
+                  if (isDragging) {
+                    const ring = Skia.Path.Make();
+                    ring.addOval(dotRect);
+                    elements.push(
+                      <Path
+                        key={`lasso-dot-ring-${poly.id}-${i}`}
+                        path={ring}
+                        color={lassoRenderColor}
+                        style="stroke"
+                        strokeWidth={2}
+                        antiAlias
+                      />,
+                    );
+                  }
+                }
+              }
+
+              // Render current (open) polygon
+              if (currentLassoVertices && currentLassoVertices.length > 0) {
+                const openVerts = visibleWallVerts(currentLassoVertices);
+                if (openVerts.length > 0) {
+                  const openPath = Skia.Path.Make();
+                  const v0 = n2c(openVerts[0].x, openVerts[0].y);
+                  openPath.moveTo(v0.x, v0.y);
+                  for (let i = 1; i < openVerts.length; i++) {
+                    const vt = n2c(openVerts[i].x, openVerts[i].y);
+                    openPath.lineTo(vt.x, vt.y);
+                  }
+                  if (openVerts.length >= 3) {
+                    openPath.lineTo(v0.x, v0.y);
+                  }
+
+                  elements.push(
+                    <Path
+                      key="lasso-current"
+                      path={openPath}
+                      color={lassoRenderColor}
+                      style="stroke"
+                      strokeWidth={2.5}
+                      strokeJoin="round"
+                      antiAlias
+                    >
+                      <DashPathEffect intervals={[10, 6]} />
+                    </Path>,
+                  );
+
+                  // Vertex dots for current polygon
+                  for (let i = 0; i < openVerts.length; i++) {
+                    const vc = n2c(openVerts[i].x, openVerts[i].y);
+                    const isDragging =
+                      lassoDragVertex?.kind === 'open' &&
+                      lassoDragVertex.vertexIndex === i;
+                    const isCloseAnchor =
+                      i === 0 && openVerts.length >= 3 && !isDragging;
+                    const dotR = isDragging ? 7 : isCloseAnchor ? 6 : 4;
+                    const dot = Skia.Path.Make();
+                    const dotRect = Skia.XYWHRect(
+                      vc.x - dotR,
+                      vc.y - dotR,
+                      dotR * 2,
+                      dotR * 2,
+                    );
+                    dot.addOval(dotRect);
+                    elements.push(
+                      <Path
+                        key={`lasso-dot-cur-${i}`}
+                        path={dot}
+                        color={isDragging ? '#FFFFFF' : lassoRenderColor}
+                        style="fill"
+                        antiAlias
+                      />,
+                    );
+                    if (isDragging || isCloseAnchor) {
+                      const ring = Skia.Path.Make();
+                      const ringR = isCloseAnchor ? dotR + 5 : dotR;
+                      ring.addOval(Skia.XYWHRect(
+                        vc.x - ringR, vc.y - ringR, ringR * 2, ringR * 2,
+                      ));
+                      elements.push(
+                        <Path
+                          key={`lasso-dot-cur-ring-${i}`}
+                          path={ring}
+                          color={lassoRenderColor}
+                          style="stroke"
+                          strokeWidth={isCloseAnchor ? 1.5 : 2}
+                          opacity={isCloseAnchor ? 0.65 : 1}
+                          antiAlias
+                        />,
+                      );
+                    }
+                  }
+                }
+              }
+
+              return elements;
+            })()}
           </Group>
         </Group>
       </>
@@ -1916,6 +3003,8 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
           canvasWRef.current, canvasHRef.current,
           zoomScaleRef.current, panOffsetRef.current,
         );
+
+
         if (hasActiveBrushRef.current) {
           onCanvasTapRef.current(coords.x, coords.y);
         } else {
@@ -2044,6 +3133,9 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
   const panGesture = useMemo(
     () => {
       const onStartJS = () => {
+        if (isLassoActiveRef.current && lassoDragRef.current) {
+          return;
+        }
         panBaseRef.current = { ...panOffsetRef.current };
       };
       const onUpdateJS = (translationX: number, translationY: number) => {
@@ -2089,14 +3181,357 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
     [],
   );
 
+  // ── Gesture: lasso pointer (tap to place vertices + drag anchors) ───────
+  const lassoPointerGesture = useMemo(
+    () => {
+      const applyVertexMove = (normX: number, normY: number) => {
+        const drag = lassoDragRef.current;
+        if (!drag) return;
+
+        const maskData = regionMaskDataRef.current;
+        const wallMask = buildWallMaskSampleFromRef(maskData);
+        const point = wallMask
+          ? resolveLassoWallDragPoint(
+              normX, normY, wallMask, LASSO_EDGE_SNAP_SEG_PX,
+            )
+          : { x: normX, y: normY };
+        if (!point) {
+          return;
+        }
+        const excludePolyId =
+          drag.kind === 'closed' ? drag.polyId : undefined;
+        if (isNormPointOnAssignedWall(point.x, point.y, maskData)) {
+          return;
+        }
+        if (
+          isNormPointInCommittedLassoArea(
+            point.x,
+            point.y,
+            manualWallRegionsRef.current,
+            lassoPolygonsRef.current,
+            excludePolyId,
+          )
+        ) {
+          return;
+        }
+
+        lassoDragMovedRef.current = true;
+
+        if (drag.kind === 'open') {
+          setCurrentLassoVertices(prev => {
+            if (!prev || drag.vertexIndex >= prev.length) return prev;
+            const next = [...prev];
+            next[drag.vertexIndex] = point;
+            currentLassoVerticesRef.current = next;
+            return next;
+          });
+          return;
+        }
+
+        if (drag.kind === 'closed' && drag.polyId) {
+          setLassoPolygons(prev => {
+            const poly = prev.get(drag.polyId!);
+            if (!poly || drag.vertexIndex >= poly.vertices.length) return prev;
+            const next = new Map(prev);
+            const verts = [...poly.vertices];
+            verts[drag.vertexIndex] = point;
+            next.set(drag.polyId!, { ...poly, vertices: verts });
+            lassoPolygonsRef.current = next;
+            return next;
+          });
+        }
+      };
+
+      const performLassoTapJS = (sx: number, sy: number) => {
+        const cw = canvasWRef.current;
+        const ch = canvasHRef.current;
+        if (cw <= 0 || ch <= 0) return;
+
+        const canvasCoords = screenToCanvasCoords(
+          sx, sy, cw, ch,
+          zoomScaleRef.current, panOffsetRef.current,
+        );
+
+        const imgSz = imageSizeRef2.current;
+        if (!imgSz) return;
+
+        const rawNorm = canvasToNormalized(
+          canvasCoords.x, canvasCoords.y, cw, ch, imgSz.w, imgSz.h,
+        );
+        if (!rawNorm) return;
+
+        const wallMask = buildWallMaskSampleFromRef(regionMaskDataRef.current);
+        const maskData = regionMaskDataRef.current;
+        const norm = wallMask
+          ? snapNormPointToWallCornerOrEdge(
+              rawNorm.x, rawNorm.y, wallMask, LASSO_TAP_SNAP_SEG_PX,
+            )
+          : rawNorm;
+
+        const em = energyMapRef.current;
+        const isMagnetic = em != null;
+
+        // Tap near the first vertex → close polygon
+        if (currentLassoVerticesRef.current && currentLassoVerticesRef.current.length >= 3) {
+          if (
+            isNearOpenLassoFirstVertex(
+              canvasCoords.x, canvasCoords.y,
+              cw, ch, imgSz.w, imgSz.h,
+              currentLassoVerticesRef.current,
+              LASSO_CLOSE_THRESHOLD_PX,
+            )
+          ) {
+            const openVerts = currentLassoVerticesRef.current;
+            if (!openVerts || openVerts.length < 3) {
+              return;
+            }
+            if (
+              lassoPolygonUsesCommittedArea(
+                openVerts,
+                maskData,
+                manualWallRegionsRef.current,
+                lassoPolygonsRef.current,
+              )
+            ) {
+              return;
+            }
+            const id = `lasso_${++lassoIdCounterRef.current}`;
+            const polygon: LassoPolygon = {
+              id,
+              vertices: [...openVerts],
+              isClosed: true,
+            };
+            setLassoPolygons(prev => {
+              const next = new Map(prev);
+              next.set(id, polygon);
+              lassoPolygonsRef.current = next;
+              return next;
+            });
+            setCurrentLassoVertices(null);
+            currentLassoVerticesRef.current = null;
+            return;
+          }
+        }
+
+
+        if (
+          !canPlaceLassoPointAt(
+            norm.x,
+            norm.y,
+            maskData,
+            wallMask,
+            manualWallRegionsRef.current,
+            lassoPolygonsRef.current,
+          )
+        ) {
+          return;
+        }
+
+        const openVerts = currentLassoVerticesRef.current;
+        if (openVerts && openVerts.length > 0) {
+          for (let i = 0; i < openVerts.length; i++) {
+            if (
+              canvasDistToNormVertex(
+                canvasCoords.x, canvasCoords.y,
+                openVerts[i].x, openVerts[i].y,
+                cw, ch, imgSz.w, imgSz.h,
+              ) < LASSO_VERTEX_HIT_PX
+            ) {
+              return;
+            }
+          }
+          const last = openVerts[openVerts.length - 1];
+          if (
+            canvasDistToNormVertex(
+              canvasCoords.x, canvasCoords.y,
+              last.x, last.y,
+              cw, ch, imgSz.w, imgSz.h,
+            ) < LASSO_MIN_VERTEX_SPACING_PX
+          ) {
+            return;
+          }
+        }
+
+        // Magnetic lasso: snap path to edges between consecutive taps
+        if (isMagnetic) {
+          const prevVerts = currentLassoVerticesRef.current;
+          if (prevVerts && prevVerts.length > 0) {
+            const lastNorm = prevVerts[prevVerts.length - 1];
+            const lastE = normToEnergyPoint(lastNorm.x, lastNorm.y, em);
+            const tapE = normToEnergyPoint(norm.x, norm.y, em);
+
+            const rawPath = findShortestPath(
+              em.map,
+              em.w,
+              em.h,
+              lastE.x,
+              lastE.y,
+              tapE.x,
+              tapE.y,
+              em.traversable,
+            );
+            const corners = extractCornerPoints(rawPath, 4, 1.0);
+            const normPoints = energyPointsToNorm(corners, em)
+              .filter(p =>
+                canPlaceLassoPointAt(
+                  p.x, p.y, maskData, wallMask,
+                  manualWallRegionsRef.current,
+                  lassoPolygonsRef.current,
+                ),
+              )
+              .filter((p, i) => {
+                if (i > 0) return true;
+                const lastV = prevVerts[prevVerts.length - 1];
+                return Math.hypot(p.x - lastV.x, p.y - lastV.y) > 0.0005;
+              });
+
+            if (normPoints.length === 0) {
+              return;
+            }
+
+            setCurrentLassoVertices(prev => {
+              if (!prev) return normPoints;
+              const next = [...prev, ...normPoints];
+              currentLassoVerticesRef.current = next;
+              return next;
+            });
+            return;
+          }
+        }
+
+        // Simple lasso: add single vertex
+        setCurrentLassoVertices(prev => {
+          const next = prev ? [...prev, norm] : [norm];
+          currentLassoVerticesRef.current = next;
+          return next;
+        });
+      };
+
+      const onBeginJS = (sx: number, sy: number) => {
+        lassoPendingTapRef.current = { x: sx, y: sy };
+        lassoDragMovedRef.current = false;
+        lassoVertexCandidateRef.current = null;
+
+        const cw = canvasWRef.current;
+        const ch = canvasHRef.current;
+        const imgSz = imageSizeRef2.current;
+        if (!imgSz || cw <= 0 || ch <= 0) return;
+
+        const coords = screenToCanvasCoords(
+          sx, sy, cw, ch,
+          zoomScaleRef.current, panOffsetRef.current,
+        );
+
+        const openVerts = currentLassoVerticesRef.current;
+        const drawingOpen = openVerts != null && openVerts.length > 0;
+
+        const hit = findLassoVertexHit(
+          coords.x, coords.y,
+          cw, ch, imgSz.w, imgSz.h,
+          LASSO_VERTEX_HIT_PX,
+          openVerts,
+          lassoPolygonsRef.current,
+          { openOnly: drawingOpen },
+        );
+        if (hit) {
+          lassoVertexCandidateRef.current = hit;
+        }
+      };
+
+      const onUpdateJS = (sx: number, sy: number) => {
+        if (lassoDragRef.current) {
+          const cw = canvasWRef.current;
+          const ch = canvasHRef.current;
+          const imgSz = imageSizeRef2.current;
+          if (!imgSz || cw <= 0 || ch <= 0) return;
+
+          const coords = screenToCanvasCoords(
+            sx, sy, cw, ch,
+            zoomScaleRef.current, panOffsetRef.current,
+          );
+          const norm = canvasToNormalized(
+            coords.x, coords.y, cw, ch, imgSz.w, imgSz.h,
+          );
+          if (!norm) return;
+
+          applyVertexMove(norm.x, norm.y);
+          return;
+        }
+
+        const pending = lassoPendingTapRef.current;
+        if (!pending) return;
+
+        const moved = Math.hypot(sx - pending.x, sy - pending.y);
+        if (moved > LASSO_TAP_CANCEL_PX && !lassoVertexCandidateRef.current) {
+          lassoPendingTapRef.current = null;
+          return;
+        }
+
+        const candidate = lassoVertexCandidateRef.current;
+        if (!candidate || moved < LASSO_DRAG_ACTIVATE_PX) {
+          return;
+        }
+
+        lassoDragRef.current = candidate;
+        lassoVertexCandidateRef.current = null;
+        lassoPendingTapRef.current = null;
+        setLassoDragVertex(candidate);
+      };
+
+      const onEndJS = (sx: number, sy: number) => {
+        if (lassoDragRef.current) {
+          lassoDragRef.current = null;
+          lassoDragMovedRef.current = false;
+          lassoVertexCandidateRef.current = null;
+          setLassoDragVertex(null);
+          return;
+        }
+
+        lassoVertexCandidateRef.current = null;
+        const pending = lassoPendingTapRef.current;
+        lassoPendingTapRef.current = null;
+        if (pending) {
+          performLassoTapJS(pending.x, pending.y);
+        }
+      };
+
+      return Gesture.Pan()
+        .minPointers(1)
+        .maxPointers(1)
+        .minDistance(0)
+        .onBegin((e) => {
+          'worklet';
+          runOnJS(onBeginJS)(e.x, e.y);
+        })
+        .onUpdate((e) => {
+          'worklet';
+          runOnJS(onUpdateJS)(e.x, e.y);
+        })
+        .onEnd((e) => {
+          'worklet';
+          runOnJS(onEndJS)(e.x, e.y);
+        })
+        .onFinalize((e) => {
+          'worklet';
+          runOnJS(onEndJS)(e.x, e.y);
+        });
+    },
+    [],
+  );
+
   // ── Composed: pinch + pan simultaneous; tap only when neither claims ───
+  // When lasso mode is active, swap the normal paint tap for lasso pointer.
   const composedGesture = useMemo(
-    () =>
-      Gesture.Exclusive(
+    () => {
+      if (isLassoActive) {
+        return Gesture.Simultaneous(pinchGesture, lassoPointerGesture);
+      }
+      return Gesture.Exclusive(
         Gesture.Simultaneous(pinchGesture, panGesture),
         tapGesture,
-      ),
-    [],
+      );
+    },
+    [isLassoActive, tapGesture, lassoPointerGesture, pinchGesture, panGesture],
   );
 
 
@@ -2110,7 +3545,7 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
         }}
       >
         {canvasLayoutReady ? (
-          <GestureDetector gesture={composedGesture}>
+          <GestureDetector key={isLassoActive ? 'lasso' : 'paint'} gesture={composedGesture}>
             <View style={{ width: canvasW, height: canvasH }}>
               <Canvas
                 style={{ width: canvasW, height: canvasH }}

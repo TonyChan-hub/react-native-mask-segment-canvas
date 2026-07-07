@@ -137,6 +137,13 @@ export const DEFAULT_MASK_CONFIG: Required<
   splitWallsColorDistSq: 1400,
   splitWallsChromaBlurRadius: 5,
   splitWallsNeutralChromaMax: 14,
+  splitWallsEdgeBarrierThreshold: 160,
+  splitWallsCloseMaskRadius:4,
+  manualSplitWalls: false,
+  manualSplitWallsMaxCount: 8,
+  manualSplitWallsGapAbsorbDilatePx: 5,
+  magneticLasso: false,
+  activeContourRefine: false,
 };
 
 export type ResolvedMaskSegmentRuntime = {
@@ -209,6 +216,24 @@ export function mergeMaskConfig(
     splitWallsNeutralChromaMax:
       partial.splitWallsNeutralChromaMax ??
       DEFAULT_MASK_CONFIG.splitWallsNeutralChromaMax,
+    splitWallsEdgeBarrierThreshold:
+      partial.splitWallsEdgeBarrierThreshold ??
+      DEFAULT_MASK_CONFIG.splitWallsEdgeBarrierThreshold,
+    splitWallsCloseMaskRadius:
+      partial.splitWallsCloseMaskRadius ??
+      DEFAULT_MASK_CONFIG.splitWallsCloseMaskRadius,
+    manualSplitWalls:
+      partial.manualSplitWalls ?? DEFAULT_MASK_CONFIG.manualSplitWalls,
+    manualSplitWallsMaxCount:
+      partial.manualSplitWallsMaxCount ??
+      DEFAULT_MASK_CONFIG.manualSplitWallsMaxCount,
+    manualSplitWallsGapAbsorbDilatePx:
+      partial.manualSplitWallsGapAbsorbDilatePx ??
+      DEFAULT_MASK_CONFIG.manualSplitWallsGapAbsorbDilatePx,
+    magneticLasso:
+      partial.magneticLasso ?? DEFAULT_MASK_CONFIG.magneticLasso,
+    activeContourRefine:
+      partial.activeContourRefine ?? DEFAULT_MASK_CONFIG.activeContourRefine,
   };
 }
 

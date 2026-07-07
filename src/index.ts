@@ -2,6 +2,8 @@ export { default } from './components/MaskSegmentCanvas';
 export type {
   BgrColor,
   InteractionConfig,
+  LassoPolygon,
+  ManualWallPartition,
   MaskSegmentCanvasProps,
   MaskSegmentCanvasRef,
   MaskSegmentConfig,

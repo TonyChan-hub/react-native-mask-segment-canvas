@@ -29,5 +29,23 @@ title: "Props: maskConfig"
 | `splitWallsColorDistSq` | `number` | `1400` | Connected-component chroma mean distance squared threshold |
 | `splitWallsChromaBlurRadius` | `number` | `5` | Reserved: chroma smoothing radius |
 | `splitWallsNeutralChromaMax` | `number` | `14` | White/gray wall low-chroma radius; forced boundary from colored walls |
+| `splitWallsEdgeBarrierThreshold` | `number` | `160` | Raw per-channel BGR Sobel gradient threshold for edge barriers (0 = disabled). Visible wall seams ≈ 120–280, subtle lighting gradients ≈ 20–80 |
+| `splitWallsCloseMaskRadius` | `number` | `3` | Morphological close radius for wall mask holes (windows, doors) before component labeling. 0 = disable |
+| `manualSplitWalls` | `boolean` | `false` | When `true`, disables automatic texture-based wall splitting. Manual lasso partitioning is used instead |
+| `manualSplitWallsMaxCount` | `number` | `8` | Maximum number of manual wall sub-regions defined by lasso |
+| `manualSplitWallsGapAbsorbDilatePx` | `number` | `5` | Morphological dilation radius (seg pixels) to merge thin unassigned wall pockets adjacent to the drawn polygon |
+| `magneticLasso` | `boolean` | `false` | When `true`, lasso mode uses edge-snapping via Sobel gradient + Dijkstra shortest-path |
+| `activeContourRefine` | `boolean` | `false` | After End Lasso, run active contour refinement on each polygon to expand vertices outward toward wall-mask edges |
 
 When `splitWalls` is enabled, the single `wall` region is replaced by multiple `wall-N` sub-regions, each independently paintable and undoable. Old sessions with `regionName: 'wall'` cannot map to new sub-region names and must be repainted.
+
+### Manual Wall Split (Lasso Mode)
+
+When `manualSplitWalls` is enabled, automatic texture-based wall splitting is disabled. Instead, users must use the **Lasso** feature to manually draw polygons on the wall area:
+
+- Call `ref.startLasso()` to enter lasso mode, then tap on wall areas to place polygon vertices.
+- Enable `magneticLasso` for edge-snapping — paths will follow strong image edges (Sobel gradient + Dijkstra shortest-path).
+- Enable `activeContourRefine` to automatically expand vertices outward toward the wall-mask boundary after lasso completion.
+- Call `ref.endLasso()` to convert closed lasso polygons into `wall-N` sub-regions for painting.
+- Use `splitWallsCloseMaskRadius` to fill wall mask holes (windows, doors) before component labeling during automatic split.
+- Use `splitWallsEdgeBarrierThreshold` to prevent BFS from crossing strong edges (window frames, door frames) during automatic split.

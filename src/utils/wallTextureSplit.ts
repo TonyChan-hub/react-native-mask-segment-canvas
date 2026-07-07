@@ -16,14 +16,87 @@ function maskCfg() {
   return getMaskSegmentRuntimeConfig().mask;
 }
 
-function bboxToPolygon(bbox: SegmentRegion['bbox']): { x: number; y: number }[] {
-  return [
-    { x: bbox.x, y: bbox.y },
-    { x: bbox.x + bbox.w, y: bbox.y },
-    { x: bbox.x + bbox.w, y: bbox.y + bbox.h },
-    { x: bbox.x, y: bbox.y + bbox.h },
+type Point = { x: number; y: number };
+
+/** Moore-neighbor boundary tracer on a binary mask component. */
+function traceMaskPolygon(
+  mask: Uint8Array,
+  cols: number,
+  rows: number,
+): Point[] {
+  // Find first non-zero pixel (top-left)
+  let startX = -1, startY = -1;
+  for (let y = 0; y < rows; y++) {
+    for (let x = 0; x < cols; x++) {
+      if (mask[y * cols + x]) { startX = x; startY = y; break; }
+    }
+    if (startX >= 0) break;
+  }
+  if (startX < 0) return [];
+
+  // Moore 8-neighbor clockwise trace
+  const dirs: [number, number][] = [
+    [1, 0], [1, -1], [0, -1], [-1, -1],
+    [-1, 0], [-1, 1], [0, 1], [1, 1],
   ];
+  const path: Point[] = [];
+  let cx = startX, cy = startY;
+  let dir = 7; // start searching from up-left
+
+  for (let i = 0; i < cols * rows; i++) {
+    path.push({ x: cx, y: cy });
+    let found = false;
+    for (let j = 0; j < 8; j++) {
+      const d = (dir + 1 + j) % 8; // search clockwise from last direction+1
+      const nx = cx + dirs[d][0];
+      const ny = cy + dirs[d][1];
+      if (nx < 0 || nx >= cols || ny < 0 || ny >= rows) continue;
+      if (mask[ny * cols + nx]) {
+        cx = nx; cy = ny; dir = (d + 4) % 8; // face back toward previous pixel
+        found = true;
+        break;
+      }
+    }
+    if (!found) break;
+    if (path.length > 2 && cx === startX && cy === startY) break;
+  }
+
+  return path;
 }
+
+/** Douglas-Peucker polygon simplification (epsilon in pixels). */
+function simplifyPolygon(points: Point[], epsilon: number): Point[] {
+  if (points.length <= 2) return [...points];
+  const keep = new Uint8Array(points.length);
+  keep[0] = 1;
+  keep[points.length - 1] = 1;
+
+  const recurse = (s: number, e: number) => {
+    if (e - s <= 1) return;
+    const dx = points[e].x - points[s].x;
+    const dy = points[e].y - points[s].y;
+    const lenSq = dx * dx + dy * dy;
+    let maxDist = 0, maxIdx = s;
+    for (let i = s + 1; i < e; i++) {
+      let d: number;
+      if (lenSq === 0) {
+        d = Math.hypot(points[i].x - points[s].x, points[i].y - points[s].y);
+      } else {
+        const t = Math.max(0, Math.min(1,
+          ((points[i].x - points[s].x) * dx + (points[i].y - points[s].y) * dy) / lenSq,
+        ));
+        d = Math.hypot(points[i].x - (points[s].x + t * dx), points[i].y - (points[s].y + t * dy));
+      }
+      if (d > maxDist) { maxDist = d; maxIdx = i; }
+    }
+    if (maxDist > epsilon) { keep[maxIdx] = 1; recurse(s, maxIdx); recurse(maxIdx, e); }
+  };
+  recurse(0, points.length - 1);
+
+  return points.filter((_, i) => keep[i]);
+}
+
+const POLYGON_SIMPLIFY_EPSILON = 2.5;
 
 function computeLabChromaMaps(
   originBgr: Uint8Array,
@@ -40,6 +113,79 @@ function computeLabChromaMaps(
     bMap[i] = lab.b;
   }
   return { aMap, bMap };
+}
+
+/** Per-channel BGR Sobel gradient magnitude. max(B, G, R) for sensitivity to color edges. */
+function buildEdgeBarrierMask(
+  bgr: Uint8Array,
+  cols: number,
+  rows: number,
+  wallIdx: number,
+  labels: Uint8Array,
+  baseboardBinary: Uint8Array,
+  threshold: number,
+): Uint8Array {
+  const n = cols * rows;
+  const barriers = new Uint8Array(n);
+  if (threshold <= 0) return barriers;
+
+  // Per-channel Sobel 3x3 → take max raw gradient.
+  // Raw range is [0, ~1442] for 8‑bit BGR. No normalization — a single
+  // extremely strong edge (e.g. window frame) would compress all other
+  // edges if we normalized relative to maxG.
+  const C = cols;
+
+  for (let y = 1; y < rows - 1; y++) {
+    const r0 = (y - 1) * C;
+    const r1 = y * C;
+    const r2 = (y + 1) * C;
+    for (let x = 1; x < C - 1; x++) {
+      const i = r1 + x;
+      if (labels[i] !== wallIdx || baseboardBinary[i]) continue;
+
+      const a0 = r0 + (x - 1), a1 = r0 + x, a2 = r0 + (x + 1);
+      const b0 = r1 + (x - 1),             b2 = r1 + (x + 1);
+      const c0 = r2 + (x - 1), c1 = r2 + x, c2 = r2 + (x + 1);
+
+      let best = 0;
+      for (let ch = 0; ch < 3; ch++) {
+        const a = bgr[a0 * 3 + ch];
+        const b = bgr[a1 * 3 + ch];
+        const c = bgr[a2 * 3 + ch];
+        const d = bgr[b0 * 3 + ch];
+        const e = bgr[b2 * 3 + ch];
+        const f = bgr[c0 * 3 + ch];
+        const gv = bgr[c1 * 3 + ch];
+        const h = bgr[c2 * 3 + ch];
+        const gx = -a + c - 2 * d + 2 * e - f + h;
+        const gy = -a - 2 * b - c + f + 2 * gv + h;
+        const mag = Math.sqrt(gx * gx + gy * gy);
+        if (mag > best) best = mag;
+      }
+      if (best > threshold) barriers[i] = 1;
+    }
+  }
+
+  // Dilate 1px to widen the barrier slightly
+  return dilateBinary1px(barriers, cols, rows);
+}
+
+function dilateBinary1px(src: Uint8Array, cols: number, rows: number): Uint8Array {
+  const dst = new Uint8Array(src);
+  for (let y = 1; y < rows - 1; y++) {
+    const rc = y * cols;
+    for (let x = 1; x < cols - 1; x++) {
+      const i = rc + x;
+      if (src[i]) continue;
+      if (
+        src[i - 1] || src[i + 1] ||
+        src[(y - 1) * cols + x] || src[(y + 1) * cols + x]
+      ) {
+        dst[i] = 1;
+      }
+    }
+  }
+  return dst;
 }
 
 function chromaMag(a: number, b: number): number {
@@ -110,6 +256,81 @@ function isWallPixel(
 }
 
 /**
+ * Morphological close on the wall mask: dilate then erode to fill small
+ * non-wall holes (windows, doors, occlusions) that would otherwise
+ * fragment a single wall into disconnected components during BFS.
+ * Returns a temporary labels array with holes filled as wallIdx.
+ */
+function closeWallMask(
+  labels: Uint8Array,
+  baseboardBinary: Uint8Array,
+  wallIdx: number,
+  cols: number,
+  rows: number,
+  radius: number,
+): { labels: Uint8Array; baseboardBinary: Uint8Array } {
+  const n = cols * rows;
+
+  // Binary wall mask
+  const bin = new Uint8Array(n);
+  for (let i = 0; i < n; i++) {
+    if (labels[i] === wallIdx && !baseboardBinary[i]) bin[i] = 1;
+  }
+
+  // Dilate N times
+  let dilated = bin;
+  for (let pass = 0; pass < radius; pass++) {
+    dilated = dilateBinary1px(dilated, cols, rows);
+  }
+
+  // Erode N times
+  let closed = dilated;
+  for (let pass = 0; pass < radius; pass++) {
+    closed = erodeBinary1px(closed, cols, rows);
+  }
+
+  // Build closed labels: pixels that were NOT wall but are now in the closed
+  // mask get wallIdx so the BFS can cross them. Original non-wall pixels
+  // outside the wall area are unchanged.
+  const closedLabels = new Uint8Array(labels);
+  for (let i = 0; i < n; i++) {
+    if (closed[i] && labels[i] !== wallIdx && !baseboardBinary[i]) {
+      closedLabels[i] = wallIdx;
+    }
+  }
+
+  // These pixels were baseboard or other semantic — keep them excluded
+  const closedBaseboard = new Uint8Array(baseboardBinary);
+  for (let i = 0; i < n; i++) {
+    if (closed[i] && labels[i] !== wallIdx && baseboardBinary[i]) {
+      // Baseboard inside the closed area: treat as wall so it doesn't block BFS
+      closedLabels[i] = wallIdx;
+      closedBaseboard[i] = 0;
+    }
+  }
+
+  return { labels: closedLabels, baseboardBinary: closedBaseboard };
+}
+
+function erodeBinary1px(src: Uint8Array, cols: number, rows: number): Uint8Array {
+  const dst = new Uint8Array(src);
+  for (let y = 1; y < rows - 1; y++) {
+    const rc = y * cols;
+    for (let x = 1; x < cols - 1; x++) {
+      const i = rc + x;
+      if (!src[i]) continue;
+      if (
+        !src[rc + (x - 1)] || !src[rc + (x + 1)] ||
+        !src[(y - 1) * cols + x] || !src[(y + 1) * cols + x]
+      ) {
+        dst[i] = 0;
+      }
+    }
+  }
+  return dst;
+}
+
+/**
  * 4-connected component growth: compares against component chroma mean to avoid chain bridging;
  * forces separation at neutral/colored wall boundaries.
  */
@@ -119,6 +340,7 @@ function labelWallComponents(
   wallIdx: number,
   aMap: Uint8Array,
   bMap: Uint8Array,
+  barrierMask: Uint8Array,
   cols: number,
   rows: number,
   distSqThreshold: number,
@@ -164,6 +386,7 @@ function labelWallComponents(
           const nx = ni % cols;
           if (Math.abs(nx - cx) > 1) continue;
           if (!isWallPixel(labels, baseboardBinary, wallIdx, ni)) continue;
+          if (barrierMask[ni]) continue;
           if (compLabels[ni] >= 0) continue;
 
           const na = aMap[ni];
@@ -379,11 +602,102 @@ function mergeSmallComponents(
     }
   }
 
+  // Second pass: any component that is smaller than its most-adjacent
+  // neighbor is almost certainly a barrier artefact — merge it.
+  for (let c = 0; c < compCount; c++) {
+    if (stats[c].area <= 0) continue;
+    const neighbors = adjacency.get(c);
+    if (!neighbors || neighbors.size === 0) continue;
+    let bestNeighbor = -1;
+    let bestBorder = 0;
+    for (const [nb, border] of neighbors) {
+      if (border > bestBorder) {
+        bestBorder = border;
+        bestNeighbor = nb;
+      }
+    }
+    if (bestNeighbor < 0) continue;
+    if (stats[c].area >= stats[bestNeighbor].area) continue;
+    union(c, bestNeighbor);
+  }
+
   const pixelCount = cols * rows;
   for (let i = 0; i < pixelCount; i++) {
     const c = compLabels[i];
     if (c < 0) continue;
     compLabels[i] = find(c);
+  }
+}
+
+/**
+ * Fresh-adjacency pass: rebuild the adjacency graph from current labels and
+ * merge every component below minArea into its most-adjacent larger neighbor.
+ * Runs until all tiny fragments are absorbed or no more merges possible.
+ */
+function mergeFreshTinyComponents(
+  compLabels: Int32Array,
+  stats: WallComponent[],
+  cols: number,
+  rows: number,
+  minArea: number,
+): void {
+  const compCount = stats.length;
+  // Build adjacency from current labels
+  const adjacency = new Map<number, Map<number, number>>();
+  const addEdge = (a: number, b: number) => {
+    if (a === b) return;
+    let m = adjacency.get(a);
+    if (!m) { m = new Map(); adjacency.set(a, m); }
+    m.set(b, (m.get(b) ?? 0) + 1);
+  };
+  for (let y = 0; y < rows; y++) {
+    for (let x = 0; x < cols; x++) {
+      const i = y * cols + x;
+      const a = compLabels[i];
+      if (a < 0) continue;
+      if (x + 1 < cols) { const b = compLabels[i + 1]; if (b >= 0) addEdge(a, b); }
+      if (y + 1 < rows) { const b = compLabels[i + cols]; if (b >= 0) addEdge(a, b); }
+    }
+  }
+
+  const remap = new Int32Array(compCount);
+  for (let i = 0; i < compCount; i++) remap[i] = i;
+  const find = (x: number): number => {
+    while (remap[x] !== x) { remap[x] = remap[remap[x]]; x = remap[x]; }
+    return x;
+  };
+  const union = (a: number, b: number) => {
+    const ra = find(a), rb = find(b);
+    if (ra === rb) return;
+    if (stats[ra].area >= stats[rb].area) {
+      remap[rb] = ra; stats[ra].area += stats[rb].area; stats[rb].area = 0;
+    } else {
+      remap[ra] = rb; stats[rb].area += stats[ra].area; stats[ra].area = 0;
+    }
+  };
+
+  for (let iter = 0; iter < compCount; iter++) {
+    let changed = false;
+    for (let c = 0; c < compCount; c++) {
+      if (stats[c].area <= 0 || stats[c].area >= minArea) continue;
+      const nbrs = adjacency.get(c);
+      if (!nbrs || nbrs.size === 0) continue;
+      let bestNb = -1, bestBorder = 0;
+      for (const [nb, border] of nbrs) {
+        if (remap[nb] !== nb) continue;
+        if (border > bestBorder) { bestBorder = border; bestNb = nb; }
+      }
+      if (bestNb < 0) continue;
+      union(c, bestNb);
+      changed = true;
+    }
+    if (!changed) break;
+  }
+
+  const n = cols * rows;
+  for (let i = 0; i < n; i++) {
+    const c = compLabels[i];
+    if (c >= 0) compLabels[i] = find(c);
   }
 }
 
@@ -413,7 +727,7 @@ function relabelComponentsContiguous(
   return { labels: out, compCount, stats };
 }
 
-function buildPickMapAfterWallSplit(
+export function buildPickMapAfterWallSplit(
   labels: Uint8Array,
   baseboardBinary: Uint8Array,
   wallIdx: number,
@@ -437,12 +751,15 @@ function buildPickMapAfterWallSplit(
       continue;
     }
 
-    if (labels[i] === wallIdx && wallSubLabels[i] !== WALL_SUB_LABEL_NONE) {
-      const wallName = `wall-${wallSubLabels[i] + 1}`;
-      const regionId = nameToId.get(wallName);
-      if (regionId !== undefined) {
-        pick[i] = regionId + 1;
+    if (wallIdx >= 0 && labels[i] === wallIdx) {
+      if (wallSubLabels[i] !== WALL_SUB_LABEL_NONE) {
+        const wallName = `wall-${wallSubLabels[i] + 1}`;
+        const regionId = nameToId.get(wallName);
+        if (regionId !== undefined) {
+          pick[i] = regionId + 1;
+        }
       }
+      // Unpartitioned wall pixels stay 0 (no parent "wall" region after manual split).
       continue;
     }
 
@@ -459,7 +776,50 @@ function buildPickMapAfterWallSplit(
   return pick;
 }
 
-function dilatePickBuffer1px(
+/**
+ * Manual lasso split: copy the existing pick map and rewrite wall pixels only.
+ * Non-wall pick codes stay identical so prior paints and hit-testing remain stable.
+ */
+export function patchPickMapForManualWallSplit(
+  existingPick: Uint8Array,
+  labels: Uint8Array,
+  baseboardBinary: Uint8Array,
+  wallIdx: number,
+  wallSubLabels: Uint8Array,
+  nameToId: Map<string, number>,
+  cols: number,
+  rows: number,
+): Uint8Array {
+  const pixelCount = cols * rows;
+  const pick = new Uint8Array(existingPick);
+
+  if (wallIdx < 0) {
+    return pick;
+  }
+
+  for (let i = 0; i < pixelCount; i++) {
+    if (baseboardBinary[i]) {
+      continue;
+    }
+    if (labels[i] !== wallIdx) {
+      continue;
+    }
+
+    const sub = wallSubLabels[i];
+    if (sub === WALL_SUB_LABEL_NONE) {
+      pick[i] = 0;
+      continue;
+    }
+
+    const wallName = `wall-${sub + 1}`;
+    const regionId = nameToId.get(wallName);
+    pick[i] = regionId !== undefined ? regionId + 1 : 0;
+  }
+
+  return pick;
+}
+
+export function dilatePickBuffer1px(
   pick: Uint8Array,
   cols: number,
   rows: number,
@@ -505,6 +865,130 @@ function dilatePickBuffer1px(
   return dst;
 }
 
+const GAP_ABSORB_NEIGHBOURS: [number, number][] = [
+  [-1, -1], [0, -1], [1, -1],
+  [-1, 0], /*    */ [1, 0],
+  [-1, 1], [0, 1], [1, 1],
+];
+
+export type LassoPolyBBox = { x: number; y: number; w: number; h: number };
+
+function expandLassoPolyBBox(b: LassoPolyBBox, x: number, y: number): void {
+  if (b.w === 0 && b.h === 0) {
+    b.x = x;
+    b.y = y;
+    b.w = 1;
+    b.h = 1;
+    return;
+  }
+  const right = b.x + b.w;
+  const bottom = b.y + b.h;
+  if (x < b.x) {
+    b.w = right - x;
+    b.x = x;
+  } else if (x + 1 > right) {
+    b.w = x + 1 - b.x;
+  }
+  if (y < b.y) {
+    b.h = bottom - y;
+    b.y = y;
+  } else if (y + 1 > bottom) {
+    b.h = y + 1 - b.y;
+  }
+}
+
+function recomputeLassoPolyStats(
+  polyLabels: Uint8Array,
+  polyCount: number,
+  cols: number,
+  rows: number,
+  areas: number[],
+  bboxes: LassoPolyBBox[],
+): void {
+  areas.fill(0);
+  for (let pi = 0; pi < polyCount; pi++) {
+    bboxes[pi] = { x: cols, y: rows, w: 0, h: 0 };
+  }
+
+  for (let y = 0; y < rows; y++) {
+    for (let x = 0; x < cols; x++) {
+      const i = y * cols + x;
+      const pi = polyLabels[i];
+      if (pi === WALL_SUB_LABEL_NONE || pi >= polyCount) {
+        continue;
+      }
+      areas[pi]++;
+      expandLassoPolyBBox(bboxes[pi], x, y);
+    }
+  }
+}
+
+/**
+ * Morphologically dilate each lasso polygon into adjacent unassigned wall pixels
+ * (up to `dilateRadius` seg pixels) so thin gaps against the wall mask merge in.
+ */
+export function absorbSmallWallGapsForLassoPolygons(
+  polyLabels: Uint8Array,
+  polyCount: number,
+  areas: number[],
+  bboxes: LassoPolyBBox[],
+  labels: Uint8Array,
+  baseboardBinary: Uint8Array,
+  wallSemanticIdx: number,
+  priorAssignedLabels: Uint8Array,
+  cols: number,
+  rows: number,
+  dilateRadius: number,
+): void {
+  if (
+    polyCount <= 0 ||
+    dilateRadius <= 0 ||
+    wallSemanticIdx < 0
+  ) {
+    return;
+  }
+
+  const isExpandable = (i: number): boolean => {
+    if (labels[i] !== wallSemanticIdx) return false;
+    if (baseboardBinary[i]) return false;
+    if (priorAssignedLabels[i] !== WALL_SUB_LABEL_NONE) return false;
+    return polyLabels[i] === WALL_SUB_LABEL_NONE;
+  };
+
+  for (let polyIdx = 0; polyIdx < polyCount; polyIdx++) {
+    for (let pass = 0; pass < dilateRadius; pass++) {
+      const toAdd: number[] = [];
+
+      for (let y = 0; y < rows; y++) {
+        for (let x = 0; x < cols; x++) {
+          const i = y * cols + x;
+          if (polyLabels[i] !== polyIdx) continue;
+
+          for (const [dx, dy] of GAP_ABSORB_NEIGHBOURS) {
+            const nx = x + dx;
+            const ny = y + dy;
+            if (nx < 0 || nx >= cols || ny < 0 || ny >= rows) continue;
+            const ni = ny * cols + nx;
+            if (isExpandable(ni)) {
+              toAdd.push(ni);
+            }
+          }
+        }
+      }
+
+      if (toAdd.length === 0) {
+        break;
+      }
+
+      for (const ni of toAdd) {
+        polyLabels[ni] = polyIdx;
+      }
+    }
+  }
+
+  recomputeLassoPolyStats(polyLabels, polyCount, cols, rows, areas, bboxes);
+}
+
 /**
  * After semantic segmentation, subdivide the wall region into wall-1, wall-2… by source image texture features
  */
@@ -536,7 +1020,20 @@ export function splitWallRegionsByTexture(
     return result;
   }
 
+  // Close small mask holes so non-wall pixels (windows, doors) don't
+  // fragment a single wall into disconnected BFS components.
+  const closeRadius = cfg.splitWallsCloseMaskRadius ?? 3;
+  const closed = closeRadius > 0
+    ? closeWallMask(labels, baseboardBinary, wallIdx, cols, rows, closeRadius)
+    : { labels, baseboardBinary };
+  const bfsLabels = closed.labels;
+  const bfsBaseboard = closed.baseboardBinary;
+
   const { aMap: rawA, bMap: rawB } = computeLabChromaMaps(originBgr, cols, rows);
+  const barrierMask = buildEdgeBarrierMask(
+    originBgr, cols, rows, wallIdx, bfsLabels, bfsBaseboard,
+    cfg.splitWallsEdgeBarrierThreshold ?? 36,
+  );
   const distSqThreshold = cfg.splitWallsColorDistSq;
   const neutralChromaMax = cfg.splitWallsNeutralChromaMax;
   const minAreaFloor = Math.max(
@@ -545,11 +1042,12 @@ export function splitWallRegionsByTexture(
   );
 
   const { compLabels: rawCompLabels, compCount: rawCount } = labelWallComponents(
-    labels,
-    baseboardBinary,
+    bfsLabels,
+    bfsBaseboard,
     wallIdx,
     rawA,
     rawB,
+    barrierMask,
     cols,
     rows,
     distSqThreshold,
@@ -573,8 +1071,18 @@ export function splitWallRegionsByTexture(
     neutralChromaMax,
   );
 
-  const { labels: finalCompLabels, compCount, stats: finalStats } =
-    relabelComponentsContiguous(rawCompLabels, cols, rows);
+  let finalCompLabels: Int32Array;
+  let compCount: number;
+  let finalStats: WallComponent[];
+
+  {
+    const relabeled = relabelComponentsContiguous(rawCompLabels, cols, rows);
+    mergeFreshTinyComponents(relabeled.labels, relabeled.stats, cols, rows, minAreaFloor);
+    const final = relabelComponentsContiguous(relabeled.labels, cols, rows);
+    finalCompLabels = final.labels;
+    compCount = final.compCount;
+    finalStats = final.stats;
+  }
 
   if (compCount === 0) {
     return result;
@@ -607,18 +1115,37 @@ export function splitWallRegionsByTexture(
   const wallHex = wallRef?.hex ?? wallRegion.hex;
   const wallColor = wallRef?.bgr ?? wallRegion.color;
 
+  // Build per-component binary masks and trace simplified polygons
+  const compMasks = new Array<Uint8Array>(ranked.length);
+  for (let i = 0; i < pixelCount; i++) {
+    const c = finalCompLabels[i];
+    if (c < 0) continue;
+    const rank = rankMap.get(c);
+    if (rank === undefined) continue;
+    if (!compMasks[rank]) compMasks[rank] = new Uint8Array(pixelCount);
+    compMasks[rank][i] = 1;
+  }
+
   const nonWallRegions = regions.filter(reg => reg.name !== 'wall');
   const wallSubRegions: SegmentRegion[] = ranked.map((s, rank) => {
-    const bbox = s.bbox;
-    const poly = bboxToPolygon(bbox);
+    const mask = compMasks[rank];
+    const rawPoly = mask ? traceMaskPolygon(mask, cols, rows) : [];
+    const poly = simplifyPolygon(rawPoly, POLYGON_SIMPLIFY_EPSILON);
+    // Fallback to bbox if contour tracing failed
+    const fallback = poly.length >= 3 ? poly : [
+      { x: s.bbox.x, y: s.bbox.y },
+      { x: s.bbox.x + s.bbox.w, y: s.bbox.y },
+      { x: s.bbox.x + s.bbox.w, y: s.bbox.y + s.bbox.h },
+      { x: s.bbox.x, y: s.bbox.y + s.bbox.h },
+    ];
     return {
       id: 0,
       name: `wall-${rank + 1}`,
       hex: wallHex,
       color: { ...wallColor },
-      polygons: [poly],
-      outlinePolygons: [poly],
-      bbox,
+      polygons: [fallback],
+      outlinePolygons: [fallback],
+      bbox: s.bbox,
       area: s.area,
     };
   });
