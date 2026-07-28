@@ -109,6 +109,7 @@ export function clampPanOffset(
   canvasH: number,
   containRect: ContainRect | null,
 ): { x: number; y: number } {
+  'worklet';
   if (!containRect || scale <= 1 || canvasW <= 0 || canvasH <= 0) {
     return { x: 0, y: 0 };
   }

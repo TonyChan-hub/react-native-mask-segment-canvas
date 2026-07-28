@@ -12,7 +12,11 @@ import {
   StyleSheet,
 } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
-import { runOnJS } from 'react-native-reanimated';
+import {
+  runOnJS,
+  useSharedValue,
+  useDerivedValue,
+} from 'react-native-reanimated';
 import cv from '../utils/opencvAdapter';
 import {
   buildAllRegionOutlinePaths,
@@ -97,6 +101,7 @@ import {
   Skia,
   type SkImage,
   type SkPath,
+  type Transforms3d,
 } from '@shopify/react-native-skia';
 
 export type {
@@ -117,8 +122,6 @@ import {
   rectsEqual,
   getContainRect,
   canvasToNormalized,
-  buildZoomPanMatrix,
-  clampPanOffset,
   screenToCanvasCoords,
   pointInPolygon,
   pointInPolygonWithPadding,
@@ -134,6 +137,52 @@ import {
   prepareWorkScaledBgrBuffer,
   timeLog,
 } from '../utils/canvasGeometry';
+
+
+/** Worklet-safe pan clamp (inlined so gesture UI-thread code does not depend on
+ *  metro re-transpiling imported geometry helpers from the published dist). */
+function clampPanOffsetWorklet(
+  panX: number,
+  panY: number,
+  scale: number,
+  canvasW: number,
+  canvasH: number,
+  hasContain: number,
+  containX: number,
+  containY: number,
+  containW: number,
+  containH: number,
+): { x: number; y: number } {
+  'worklet';
+  if (hasContain !== 1 || scale <= 1 || canvasW <= 0 || canvasH <= 0) {
+    return { x: 0, y: 0 };
+  }
+
+  const cx = canvasW / 2;
+  const cy = canvasH / 2;
+
+  const scaledMinX = cx + scale * (containX - cx);
+  const scaledMaxX = cx + scale * (containX + containW - cx);
+  const scaledMinY = cy + scale * (containY - cy);
+  const scaledMaxY = cy + scale * (containY + containH - cy);
+
+  let x = panX;
+  let y = panY;
+
+  if (scaledMaxX - scaledMinX > canvasW) {
+    x = Math.max(canvasW - scaledMaxX, Math.min(-scaledMinX, x));
+  } else {
+    x = 0;
+  }
+
+  if (scaledMaxY - scaledMinY > canvasH) {
+    y = Math.max(canvasH - scaledMaxY, Math.min(-scaledMinY, y));
+  } else {
+    y = 0;
+  }
+
+  return { x, y };
+}
 
 type LassoVertexHit = {
   kind: 'open' | 'closed';
@@ -690,18 +739,44 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
   const canvasHRef = useRef(canvasH);
 
   // ── Pinch-zoom (focal-point) + single-finger pan when zoomed ─────────────
-  const [zoomScale, setZoomScale] = useState(1);
-  const [panOffset, setPanOffset] = useState({ x: 0, y: 0 });
+  // Drive transform via Reanimated SharedValues so pinch/pan updates stay on the
+  // UI thread and do not trigger React re-renders of the heavy Skia tree.
+  const zoomScaleSV = useSharedValue(1);
+  const panXSV = useSharedValue(0);
+  const panYSV = useSharedValue(0);
+  const canvasWSV = useSharedValue(1);
+  const canvasHSV = useSharedValue(1);
+  const containXSV = useSharedValue(0);
+  const containYSV = useSharedValue(0);
+  const containWSV = useSharedValue(0);
+  const containHSV = useSharedValue(0);
+  const hasContainSV = useSharedValue(0);
+  const isLassoActiveSV = useSharedValue(0);
 
-  // Refs for gesture callbacks (closures don't capture fresh state mid-gesture)
+  const pinchBaseScaleSV = useSharedValue(1);
+  const pinchBasePanXSV = useSharedValue(0);
+  const pinchBasePanYSV = useSharedValue(0);
+  const pinchBaseFocalXSV = useSharedValue(0);
+  const pinchBaseFocalYSV = useSharedValue(0);
+  const panBaseXSV = useSharedValue(0);
+  const panBaseYSV = useSharedValue(0);
+
+  // JS-readable mirrors for tap / lasso hit-testing (synced on gesture end).
   const zoomScaleRef = useRef(1);
   const panOffsetRef = useRef({ x: 0, y: 0 });
-  const pinchBaseScaleRef = useRef(1);
-  const pinchBasePanRef = useRef({ x: 0, y: 0 });
-  const pinchBaseFocalRef = useRef({ x: 0, y: 0 });
-  const panBaseRef = useRef({ x: 0, y: 0 });
   // Ref to the latest containRect (the actual placed photo rect inside the viewport).
   const containRectRef = useRef<ContainRect | null>(null);
+
+  const syncZoomRefsFromSV = useCallback(() => {
+    zoomScaleRef.current = zoomScaleSV.value;
+    panOffsetRef.current = { x: panXSV.value, y: panYSV.value };
+  }, [zoomScaleSV, panXSV, panYSV]);
+
+  const getLiveZoomScale = useCallback(() => zoomScaleSV.value, [zoomScaleSV]);
+  const getLivePanOffset = useCallback(
+    () => ({ x: panXSV.value, y: panYSV.value }),
+    [panXSV, panYSV],
+  );
 
   // ── Manual Lasso State ────────────────────────────────────────────────
   const [isLassoActive, setIsLassoActive] = useState(false);
@@ -734,9 +809,8 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
   const [energyMap, setEnergyMap] = useState<EnergyMap | null>(null);
   const energyMapRef = useRef<EnergyMap | null>(null);
 
-  useEffect(() => { zoomScaleRef.current = zoomScale; }, [zoomScale]);
-  useEffect(() => { panOffsetRef.current = panOffset; }, [panOffset]);
   useEffect(() => { isLassoActiveRef.current = isLassoActive; }, [isLassoActive]);
+  useEffect(() => { isLassoActiveSV.value = isLassoActive ? 1 : 0; }, [isLassoActive, isLassoActiveSV]);
   useEffect(() => { lassoPolygonsRef.current = lassoPolygons; }, [lassoPolygons]);
   useEffect(() => { currentLassoVerticesRef.current = currentLassoVertices; }, [currentLassoVertices]);
   useEffect(() => { manualWallRegionsRef.current = manualWallRegions; }, [manualWallRegions]);
@@ -748,20 +822,23 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
     }
     canvasWRef.current = width;
     canvasHRef.current = height;
+    canvasWSV.value = width;
+    canvasHSV.value = height;
     setViewportSize(prev => {
       if (prev?.w === width && prev?.h === height) {
         return prev;
       }
       return { w: width, h: height };
     });
-  }, []);
+  }, [canvasWSV, canvasHSV]);
 
   const resetZoom = useCallback(() => {
-    setZoomScale(1);
-    setPanOffset({ x: 0, y: 0 });
+    zoomScaleSV.value = 1;
+    panXSV.value = 0;
+    panYSV.value = 0;
     zoomScaleRef.current = 1;
     panOffsetRef.current = { x: 0, y: 0 };
-  }, []);
+  }, [zoomScaleSV, panXSV, panYSV]);
 
   const containRect = useMemo(() => {
     if (!imageSize) return null;
@@ -772,7 +849,21 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
   // latest containRect without TDZ or stale closure issues.
   useEffect(() => {
     containRectRef.current = containRect;
-  }, [containRect]);
+    if (containRect) {
+      containXSV.value = containRect.x;
+      containYSV.value = containRect.y;
+      containWSV.value = containRect.w;
+      containHSV.value = containRect.h;
+      hasContainSV.value = 1;
+    } else {
+      hasContainSV.value = 0;
+    }
+  }, [containRect, containXSV, containYSV, containWSV, containHSV, hasContainSV]);
+
+  useEffect(() => {
+    canvasWSV.value = canvasW;
+    canvasHSV.value = canvasH;
+  }, [canvasW, canvasH, canvasWSV, canvasHSV]);
 
   const segmentRunIdRef = useRef(0);
   const lastSegmentKeyRef = useRef('');
@@ -2651,19 +2742,25 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
     );
   };
 
-  // ── Zoom matrix for the Skia Group (pan + scale around center) ──────────
-  const zoomMatrix = useMemo(() => {
-    if (zoomScale <= 1) {
-      return undefined;
+  // ── Zoom transform for the Skia Group (pan + scale around center) ───────
+  // SharedValue-driven so pinch/pan frames skip React reconciliation.
+  const zoomTransform = useDerivedValue<Transforms3d>(() => {
+    const scale = zoomScaleSV.value;
+    if (scale <= 1) {
+      return [];
     }
-    return buildZoomPanMatrix(
-      panOffset.x,
-      panOffset.y,
-      zoomScale,
-      canvasW,
-      canvasH,
-    );
-  }, [zoomScale, panOffset, canvasW, canvasH]);
+    const cx = canvasWSV.value / 2;
+    const cy = canvasHSV.value / 2;
+    return [
+      { translateX: panXSV.value },
+      { translateY: panYSV.value },
+      { translateX: cx },
+      { translateY: cy },
+      { scale },
+      { translateX: -cx },
+      { translateY: -cy },
+    ];
+  });
 
   const renderDraw = () => {
     const displayImg = originSkImg ?? lowFreqSkImg;
@@ -2699,7 +2796,7 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
             The clip keeps drawing contained within the logical viewport and
             prevents shader content from leaking outside during zoom. */}
         <Group clip={Skia.XYWHRect(0, 0, canvasW, canvasH)}>
-          <Group matrix={zoomMatrix}>
+          <Group transform={zoomTransform}>
             {useShader && shaderOrigin ? (
               <PaintShaderLayer
                 originImage={shaderOrigin}
@@ -2974,7 +3071,7 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
         const coords = screenToCanvasCoords(
           x, y,
           canvasWRef.current, canvasHRef.current,
-          zoomScaleRef.current, panOffsetRef.current,
+          getLiveZoomScale(), getLivePanOffset(),
         );
         const regionId = findRegionAtPointRef.current(coords.x, coords.y, true);
         if (regionId == null || !imageSizeRef2.current) {
@@ -3001,7 +3098,7 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
         const coords = screenToCanvasCoords(
           x, y,
           canvasWRef.current, canvasHRef.current,
-          zoomScaleRef.current, panOffsetRef.current,
+          getLiveZoomScale(), getLivePanOffset(),
         );
 
 
@@ -3033,7 +3130,7 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
         const coords = screenToCanvasCoords(
           x, y,
           canvasWRef.current, canvasHRef.current,
-          zoomScaleRef.current, panOffsetRef.current,
+          getLiveZoomScale(), getLivePanOffset(),
         );
         onCanvasTapRef.current(coords.x, coords.y);
         setHeldRegionId(null);
@@ -3058,55 +3155,11 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
   );
 
   // ── Gesture: pinch-zoom (focal-point scale + two-finger pan; max 5×) ────
+  // All math runs on the UI thread; only sync JS refs / reset on end.
   const pinchGesture = useMemo(
     () => {
-      const onStartJS = (focalX: number, focalY: number) => {
-        pinchBaseScaleRef.current = zoomScaleRef.current;
-        pinchBasePanRef.current = { ...panOffsetRef.current };
-        pinchBaseFocalRef.current = { x: focalX, y: focalY };
-      };
-      const onUpdateJS = (scale: number, focalX: number, focalY: number) => {
-        const cw = canvasWRef.current;
-        const ch = canvasHRef.current;
-        if (cw <= 0 || ch <= 0) {
-          return;
-        }
-        const cx = cw / 2;
-        const cy = ch / 2;
-
-        const baseScale = pinchBaseScaleRef.current;
-        const basePan = pinchBasePanRef.current;
-        const baseFocal = pinchBaseFocalRef.current;
-
-        let newScale = Math.max(1, Math.min(baseScale * scale, 5));
-
-        const anchorX = (baseFocal.x - basePan.x - cx) / baseScale + cx;
-        const anchorY = (baseFocal.y - basePan.y - cy) / baseScale + cy;
-
-        let newPan = {
-          x: focalX - cx - newScale * (anchorX - cx),
-          y: focalY - cy - newScale * (anchorY - cy),
-        };
-
-        if (newScale <= 1) {
-          newScale = 1;
-          newPan = { x: 0, y: 0 };
-        } else {
-          newPan = clampPanOffset(
-            newPan,
-            newScale,
-            cw,
-            ch,
-            containRectRef.current,
-          );
-        }
-
-        setZoomScale(newScale);
-        setPanOffset(newPan);
-        zoomScaleRef.current = newScale;
-        panOffsetRef.current = newPan;
-      };
       const onEndJS = () => {
+        syncZoomRefsFromSV();
         if (zoomScaleRef.current <= 1.01) {
           resetZoomRef.current?.();
         }
@@ -3115,47 +3168,90 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
       return Gesture.Pinch()
         .onStart((e) => {
           'worklet';
-          runOnJS(onStartJS)(e.focalX, e.focalY);
+          pinchBaseScaleSV.value = zoomScaleSV.value;
+          pinchBasePanXSV.value = panXSV.value;
+          pinchBasePanYSV.value = panYSV.value;
+          pinchBaseFocalXSV.value = e.focalX;
+          pinchBaseFocalYSV.value = e.focalY;
         })
         .onUpdate((e) => {
           'worklet';
-          runOnJS(onUpdateJS)(e.scale, e.focalX, e.focalY);
+          const cw = canvasWSV.value;
+          const ch = canvasHSV.value;
+          if (cw <= 0 || ch <= 0) {
+            return;
+          }
+          const cx = cw / 2;
+          const cy = ch / 2;
+
+          const baseScale = pinchBaseScaleSV.value;
+          const basePanX = pinchBasePanXSV.value;
+          const basePanY = pinchBasePanYSV.value;
+          const baseFocalX = pinchBaseFocalXSV.value;
+          const baseFocalY = pinchBaseFocalYSV.value;
+
+          let newScale = Math.max(1, Math.min(baseScale * e.scale, 5));
+
+          const anchorX = (baseFocalX - basePanX - cx) / baseScale + cx;
+          const anchorY = (baseFocalY - basePanY - cy) / baseScale + cy;
+
+          let newPan = {
+            x: e.focalX - cx - newScale * (anchorX - cx),
+            y: e.focalY - cy - newScale * (anchorY - cy),
+          };
+
+          if (newScale <= 1) {
+            newScale = 1;
+            newPan = { x: 0, y: 0 };
+          } else {
+            newPan = clampPanOffsetWorklet(
+              newPan.x,
+              newPan.y,
+              newScale,
+              cw,
+              ch,
+              hasContainSV.value,
+              containXSV.value,
+              containYSV.value,
+              containWSV.value,
+              containHSV.value,
+            );
+          }
+
+          zoomScaleSV.value = newScale;
+          panXSV.value = newPan.x;
+          panYSV.value = newPan.y;
         })
         .onEnd(() => {
           'worklet';
           runOnJS(onEndJS)();
         });
     },
-    [],
+    [
+      syncZoomRefsFromSV,
+      zoomScaleSV,
+      panXSV,
+      panYSV,
+      canvasWSV,
+      canvasHSV,
+      containXSV,
+      containYSV,
+      containWSV,
+      containHSV,
+      hasContainSV,
+      pinchBaseScaleSV,
+      pinchBasePanXSV,
+      pinchBasePanYSV,
+      pinchBaseFocalXSV,
+      pinchBaseFocalYSV,
+    ],
   );
 
   // ── Gesture: single-finger pan (active only when zoomed) ───────────────
   const panGesture = useMemo(
     () => {
-      const onStartJS = () => {
-        if (isLassoActiveRef.current && lassoDragRef.current) {
-          return;
-        }
-        panBaseRef.current = { ...panOffsetRef.current };
-      };
-      const onUpdateJS = (translationX: number, translationY: number) => {
-        if (zoomScaleRef.current <= 1) {
-          return;
-        }
-        const newPan = clampPanOffset(
-          {
-            x: panBaseRef.current.x + translationX,
-            y: panBaseRef.current.y + translationY,
-          },
-          zoomScaleRef.current,
-          canvasWRef.current,
-          canvasHRef.current,
-          containRectRef.current,
-        );
-        setPanOffset(newPan);
-        panOffsetRef.current = newPan;
-      };
       const onEndJS = () => {
+        syncZoomRefsFromSV();
         if (zoomScaleRef.current <= 1.01) {
           resetZoomRef.current?.();
         }
@@ -3167,18 +3263,57 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
         .minDistance(10)
         .onStart(() => {
           'worklet';
-          runOnJS(onStartJS)();
+          if (isLassoActiveSV.value === 1) {
+            return;
+          }
+          panBaseXSV.value = panXSV.value;
+          panBaseYSV.value = panYSV.value;
         })
         .onUpdate((e) => {
           'worklet';
-          runOnJS(onUpdateJS)(e.translationX, e.translationY);
+          if (isLassoActiveSV.value === 1) {
+            return;
+          }
+          const scale = zoomScaleSV.value;
+          if (scale <= 1) {
+            return;
+          }
+          const newPan = clampPanOffsetWorklet(
+            panBaseXSV.value + e.translationX,
+            panBaseYSV.value + e.translationY,
+            scale,
+            canvasWSV.value,
+            canvasHSV.value,
+            hasContainSV.value,
+            containXSV.value,
+            containYSV.value,
+            containWSV.value,
+            containHSV.value,
+          );
+          panXSV.value = newPan.x;
+          panYSV.value = newPan.y;
         })
         .onEnd(() => {
           'worklet';
           runOnJS(onEndJS)();
         });
     },
-    [],
+    [
+      syncZoomRefsFromSV,
+      zoomScaleSV,
+      panXSV,
+      panYSV,
+      canvasWSV,
+      canvasHSV,
+      containXSV,
+      containYSV,
+      containWSV,
+      containHSV,
+      hasContainSV,
+      isLassoActiveSV,
+      panBaseXSV,
+      panBaseYSV,
+    ],
   );
 
   // ── Gesture: lasso pointer (tap to place vertices + drag anchors) ───────
@@ -3249,7 +3384,7 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
 
         const canvasCoords = screenToCanvasCoords(
           sx, sy, cw, ch,
-          zoomScaleRef.current, panOffsetRef.current,
+          getLiveZoomScale(), getLivePanOffset(),
         );
 
         const imgSz = imageSizeRef2.current;
@@ -3419,7 +3554,7 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
 
         const coords = screenToCanvasCoords(
           sx, sy, cw, ch,
-          zoomScaleRef.current, panOffsetRef.current,
+          getLiveZoomScale(), getLivePanOffset(),
         );
 
         const openVerts = currentLassoVerticesRef.current;
@@ -3447,7 +3582,7 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
 
           const coords = screenToCanvasCoords(
             sx, sy, cw, ch,
-            zoomScaleRef.current, panOffsetRef.current,
+            getLiveZoomScale(), getLivePanOffset(),
           );
           const norm = canvasToNormalized(
             coords.x, coords.y, cw, ch, imgSz.w, imgSz.h,
