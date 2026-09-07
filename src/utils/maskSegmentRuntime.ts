@@ -83,10 +83,10 @@ export const DEFAULT_PAINT_CONFIG: Required<PaintConfig> = {
   lLowContrast: 1.10,
   lLowBrightness: 0.92,
   lHighGain: 1.22,
-  // Edge handling: small positive feather produces soft transitions at painted region boundaries.
-  // color feather drives the paintColorMap alpha softness (used by shader for blend-to-origin).
-  maskFeatherColor: 1.6,
-  maskFeatherTexture: 0.9,
+  // Edge handling: feather softens painted region boundaries (color map alpha).
+  // Off by default for snappier interactive paints; enable when soft edges are needed.
+  maskFeatherColor: 0,
+  maskFeatherTexture: 0,
   regionOverlayFill: '#FFC14D',
   regionOutlineStrokeWidth: 4,
 };
@@ -96,6 +96,7 @@ export const DEFAULT_INTERACTION_CONFIG: Required<InteractionConfig> = {
   pickMapSearchRadiusPx: 14,
   thinStripPadding: 0.008,
   regionPadding: 0.003,
+  enableRegionGuideDots: true,
   initRegionFlashMs: 1000,
   enableInitRegionFlash: true,
 };
@@ -254,10 +255,22 @@ export function createRuntimeConfig(input?: {
       ...input?.paintConfig,
       palette: input?.paintConfig?.palette ?? DEFAULT_PAINT_CONFIG.palette,
     },
-    interaction: {
-      ...DEFAULT_INTERACTION_CONFIG,
-      ...input?.interactionConfig,
-    },
+    interaction: (() => {
+      const merged = {
+        ...DEFAULT_INTERACTION_CONFIG,
+        ...input?.interactionConfig,
+      };
+      // Backward compat: old enableInitRegionFlash maps to guide dots when the
+      // new flag is not explicitly provided.
+      if (
+        input?.interactionConfig?.enableRegionGuideDots === undefined &&
+        input?.interactionConfig?.enableInitRegionFlash !== undefined
+      ) {
+        merged.enableRegionGuideDots =
+          input.interactionConfig.enableInitRegionFlash;
+      }
+      return merged;
+    })(),
   };
 }
 
@@ -285,7 +298,20 @@ export function setMaskSegmentRuntimeConfig(input?: {
       ? { ...activeRuntime.paint, ...input.paintConfig }
       : activeRuntime.paint,
     interaction: input?.interactionConfig
-      ? { ...activeRuntime.interaction, ...input.interactionConfig }
+      ? (() => {
+          const merged = {
+            ...activeRuntime.interaction,
+            ...input.interactionConfig,
+          };
+          if (
+            input.interactionConfig.enableRegionGuideDots === undefined &&
+            input.interactionConfig.enableInitRegionFlash !== undefined
+          ) {
+            merged.enableRegionGuideDots =
+              input.interactionConfig.enableInitRegionFlash;
+          }
+          return merged;
+        })()
       : activeRuntime.interaction,
   };
   runtimeRevision += 1;

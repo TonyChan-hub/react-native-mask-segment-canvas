@@ -13,11 +13,13 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
-  ScrollView,
+  FlatList,
+  Modal,
   StatusBar,
   StyleSheet,
   Text,
   TouchableOpacity,
+  TouchableWithoutFeedback,
   View,
 } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
@@ -43,7 +45,7 @@ import MaskSegmentCanvas, {
 } from 'react-native-mask-segment-canvas';
 
 // ============================================================================
-// test images — two sets of example images, support switching
+// test images
 // replace your image path (file:// or http(s)://) when integrating into your business project
 // ============================================================================
 const TEST_IMAGE_GROUPS: Array<{
@@ -67,6 +69,41 @@ const TEST_IMAGE_GROUPS: Array<{
     originCacheName: 'example_origin_g2.png',
     maskCacheName: 'example_mask_g2.png',
   },
+  {
+    label: 'picture group 3',
+    origin: require('./assets/origin-2.png'),
+    mask: require('./assets/mask-2.png'),
+    originCacheName: 'example_origin_g3.png',
+    maskCacheName: 'example_mask_g3.png',
+  },
+  {
+    label: 'picture group 4',
+    origin: require('./assets/origin-3.png'),
+    mask: require('./assets/mask-3.png'),
+    originCacheName: 'example_origin_g4.png',
+    maskCacheName: 'example_mask_g4.png',
+  },
+  {
+    label: 'picture group 5',
+    origin: require('./assets/origin-4.png'),
+    mask: require('./assets/mask-4.png'),
+    originCacheName: 'example_origin_g5.png',
+    maskCacheName: 'example_mask_g5.png',
+  },
+  {
+    label: 'picture group 6',
+    origin: require('./assets/origin-5.png'),
+    mask: require('./assets/mask-5.png'),
+    originCacheName: 'example_origin_g6.png',
+    maskCacheName: 'example_mask_g6.png',
+  },
+  {
+    label: 'picture group 7',
+    origin: require('./assets/origin-6.png'),
+    mask: require('./assets/mask-6.png'),
+    originCacheName: 'example_origin_g7.png',
+    maskCacheName: 'example_mask_g7.png',
+  },
 ];
 
 // ============================================================================
@@ -82,7 +119,7 @@ const GYM_CUSTOM_COLORS: MaskSemanticColor[] = [
 ];
 
 // ============================================================================
-// preset brush colors (outside the bottom color bar, business can set through ref.setPaintColor)
+// preset brush colors
 // ============================================================================
 const PAINT_PRESETS: Array<{ label: string; color: BgrColor }> = [
   { label: 'Ivory white', color: { b: 200, g: 230, r: 245 } },
@@ -98,6 +135,144 @@ const INTERACTIVE_STATES: MaskSegmentWatchState[] = [
   'interactive',
   'mask_paths_ready',
 ];
+
+// ============================================================================
+// reusable dropdown components
+// ============================================================================
+
+type DropdownOption<T> = { label: string; value: T };
+
+/** Selection dropdown — pick one value from a list */
+function DropdownSelector<T extends string | number | boolean>({
+  label,
+  options,
+  value,
+  onChange,
+}: {
+  label?: string;
+  options: DropdownOption<T>[];
+  value: T;
+  onChange: (v: T) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const selected = options.find(o => o.value === value);
+  return (
+    <>
+      <TouchableOpacity
+        style={styles.dropdownBtn}
+        onPress={() => setOpen(true)}
+      >
+        <Text style={styles.dropdownBtnText}>
+          {label ? `${label}: ` : ''}{selected?.label ?? '...'} ▾
+        </Text>
+      </TouchableOpacity>
+      <Modal
+        visible={open}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setOpen(false)}
+      >
+        <TouchableWithoutFeedback onPress={() => setOpen(false)}>
+          <View style={styles.dropdownOverlay}>
+            <View style={styles.dropdownList}>
+              <FlatList
+                data={options}
+                keyExtractor={item => String(item.value)}
+                renderItem={({ item }) => (
+                  <TouchableOpacity
+                    style={[styles.dropdownItem, item.value === value && styles.dropdownItemActive]}
+                    onPress={() => {
+                      onChange(item.value);
+                      setOpen(false);
+                    }}
+                  >
+                    <Text
+                      style={[
+                        styles.dropdownItemText,
+                        item.value === value && styles.dropdownItemTextActive,
+                      ]}
+                    >
+                      {item.label}
+                    </Text>
+                  </TouchableOpacity>
+                )}
+              />
+            </View>
+          </View>
+        </TouchableWithoutFeedback>
+      </Modal>
+    </>
+  );
+}
+
+type DropdownActionItem = {
+  label: string;
+  onPress: () => void;
+  disabled?: boolean;
+  danger?: boolean;
+  active?: boolean;
+};
+
+/** Action dropdown — trigger actions from a list */
+function DropdownActions({
+  label,
+  items,
+}: {
+  label: string;
+  items: DropdownActionItem[];
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <TouchableOpacity
+        style={styles.dropdownBtn}
+        onPress={() => setOpen(true)}
+      >
+        <Text style={styles.dropdownBtnText}>{label} ▾</Text>
+      </TouchableOpacity>
+      <Modal
+        visible={open}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setOpen(false)}
+      >
+        <TouchableWithoutFeedback onPress={() => setOpen(false)}>
+          <View style={styles.dropdownOverlay}>
+            <View style={styles.dropdownList}>
+              {items.map((item, i) => (
+                <TouchableOpacity
+                  key={i}
+                  style={[
+                    styles.dropdownItem,
+                    item.danger && styles.dropdownItemDanger,
+                    item.active && styles.dropdownItemActive,
+                  ]}
+                  onPress={() => {
+                    if (!item.disabled) {
+                      item.onPress();
+                      setOpen(false);
+                    }
+                  }}
+                  disabled={item.disabled}
+                >
+                  <Text
+                    style={[
+                      styles.dropdownItemText,
+                      item.disabled && styles.dropdownItemTextDisabled,
+                      item.danger && styles.dropdownItemTextDanger,
+                    ]}
+                  >
+                    {item.label}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </View>
+        </TouchableWithoutFeedback>
+      </Modal>
+    </>
+  );
+}
 
 // ============================================================================
 // main page
@@ -210,16 +385,14 @@ function App(): React.JSX.Element {
   );
 
   // --------------------------------------------------------------------------
-  // onPaintCallback — handle paint success / brush not selected two scenarios
+  // onPaintCallback
   // --------------------------------------------------------------------------
   const handlePaintCallback = useCallback((payload: PaintCallbackPayload) => {
     if (payload.kind === 'brush_required') {
-      // user did not select a brush, the business side pops up a prompt to guide selection of color
       showToast(payload.hint);
       console.log('[Example] Need to select a brush:', payload.regionName);
       return;
     }
-    // paint success
     console.log(
       '[Example] Paint success:',
       payload.regionName,
@@ -350,6 +523,30 @@ function App(): React.JSX.Element {
   }, []);
 
   // --------------------------------------------------------------------------
+  // dropdown option presets
+  // --------------------------------------------------------------------------
+  const paletteOptions: DropdownOption<string>[] = [
+    { label: 'Default palette', value: 'default' },
+    { label: 'Custom palette', value: 'custom' },
+  ];
+
+  const imageOptions: DropdownOption<number>[] = TEST_IMAGE_GROUPS.map((g, i) => ({
+    label: g.label,
+    value: i,
+  }));
+
+  const pipelineOptions: DropdownOption<PipelinePreset>[] = [
+    { label: 'Low precision', value: 'low' },
+    { label: 'Medium precision', value: 'medium' },
+    { label: 'High precision', value: 'high' },
+  ];
+
+  const onOffOptions: DropdownOption<boolean>[] = [
+    { label: 'Off', value: false },
+    { label: 'On', value: true },
+  ];
+
+  // --------------------------------------------------------------------------
   // render: error / loading / ready
   // --------------------------------------------------------------------------
   if (pathsError) {
@@ -402,115 +599,65 @@ function App(): React.JSX.Element {
           </Text>
         </View>
 
-        {/* mode switch */}
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          style={styles.modeRow}
-          contentContainerStyle={styles.modeRowContent}
-        >
-          <TouchableOpacity
-            style={[styles.modeChip, !useCustomColors && styles.modeChipActive]}
-            onPress={() => setUseCustomColors(false)}
-          >
-            <Text style={[styles.modeChipText, !useCustomColors && styles.modeChipTextActive]}>
-              Default color palette
-            </Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.modeChip, useCustomColors && styles.modeChipActive]}
-            onPress={() => setUseCustomColors(true)}
-          >
-            <Text style={[styles.modeChipText, useCustomColors && styles.modeChipTextActive]}>
-              Custom color palette
-            </Text>
-          </TouchableOpacity>
-          <Text style={styles.modeDivider}>|</Text>
-          {TEST_IMAGE_GROUPS.map((group, idx) => (
-            <TouchableOpacity
-              key={group.label}
-              style={[styles.modeChip, groupIndex === idx && styles.modeChipActive]}
-              onPress={() => setGroupIndex(idx)}
-            >
-              <Text style={[styles.modeChipText, groupIndex === idx && styles.modeChipTextActive]}>
-                {group.label}
-              </Text>
-            </TouchableOpacity>
-          ))}
-          <Text style={styles.modeDivider}>|</Text>
-          {(['low', 'medium', 'high'] as PipelinePreset[]).map(p => (
-            <TouchableOpacity
-              key={p}
-              style={[styles.modeChip, pipelinePreset === p && styles.modeChipActive]}
-              onPress={() => setPipelinePreset(p)}
-            >
-              <Text style={[styles.modeChipText, pipelinePreset === p && styles.modeChipTextActive]}>
-                {p === 'low' ? 'Low precision' : p === 'medium' ? 'Medium precision' : 'High precision'}
-              </Text>
-            </TouchableOpacity>
-          ))}
-          <Text style={styles.modeDivider}>|</Text>
-          <TouchableOpacity
-            style={[styles.modeChip, splitWalls && styles.modeChipActive]}
-            onPress={() => setSplitWalls(v => !v)}
-          >
-            <Text style={[styles.modeChipText, splitWalls && styles.modeChipTextActive]}>
-              (split walls)
-            </Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.modeChip, manualSplitWalls && styles.modeChipActive]}
-            onPress={() => {
-              setManualSplitWalls(v => !v);
-              if (!manualSplitWalls) {
-                setSplitWalls(false);
-              }
+        <View style={styles.modeRow}>
+          <DropdownSelector
+            options={paletteOptions}
+            value={useCustomColors ? 'custom' : 'default'}
+            onChange={v => setUseCustomColors(v === 'custom')}
+          />
+          <DropdownSelector
+            options={imageOptions}
+            value={groupIndex}
+            onChange={setGroupIndex}
+          />
+          <DropdownSelector
+            options={pipelineOptions}
+            value={pipelinePreset}
+            onChange={setPipelinePreset}
+          />
+          <DropdownSelector
+            label="Split walls"
+            options={onOffOptions}
+            value={splitWalls}
+            onChange={setSplitWalls}
+          />
+          <DropdownSelector
+            label="Manual split"
+            options={onOffOptions}
+            value={manualSplitWalls}
+            onChange={v => {
+              setManualSplitWalls(v);
+              if (!v) setSplitWalls(false);
             }}
-          >
-            <Text style={[styles.modeChipText, manualSplitWalls && styles.modeChipTextActive]}>
-              (manual split)
-            </Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.modeChip, magneticLasso && styles.modeChipLassoActive]}
-            onPress={() => {
-              setMagneticLasso(v => !v);
-              if (!magneticLasso) {
-                setManualSplitWalls(true);
-              }
+          />
+          <DropdownSelector
+            label="Magnetic"
+            options={onOffOptions}
+            value={magneticLasso}
+            onChange={v => {
+              setMagneticLasso(v);
+              if (v) setManualSplitWalls(true);
             }}
-          >
-            <Text style={[styles.modeChipText, magneticLasso && styles.modeChipTextActive]}>
-              (magnetic)
-            </Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.modeChip, activeContourRefine && styles.modeChipLassoActive]}
-            onPress={() => {
-              setActiveContourRefine(v => !v);
-              if (!activeContourRefine) {
-                setManualSplitWalls(true);
-              }
+          />
+          <DropdownSelector
+            label="Contour"
+            options={onOffOptions}
+            value={activeContourRefine}
+            onChange={v => {
+              setActiveContourRefine(v);
+              if (v) setManualSplitWalls(true);
             }}
-          >
-            <Text style={[styles.modeChipText, activeContourRefine && styles.modeChipTextActive]}>
-              (contour)
-            </Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.modeChip, splitEdgeBarrier && styles.modeChipActive]}
-            onPress={() => {
-              setSplitEdgeBarrier(v => !v);
-              if (!splitEdgeBarrier) {
-                setSplitWalls(true);
-              }
+          />
+          <DropdownSelector
+            label="Edge barrier"
+            options={onOffOptions}
+            value={splitEdgeBarrier}
+            onChange={v => {
+              setSplitEdgeBarrier(v);
+              if (v) setSplitWalls(true);
             }}
-          >
-            <Text style={[styles.modeChipText, splitEdgeBarrier && styles.modeChipTextActive]}>
-              (edge barrier)
-            </Text>
-          </TouchableOpacity>
-        </ScrollView>
+          />
+        </View>
       </View>
 
       {/* canvas */}
@@ -540,8 +687,7 @@ function App(): React.JSX.Element {
           }}
           interactionConfig={{
             ...DEFAULT_INTERACTION_CONFIG,
-            initRegionFlashMs: 1000,
-            enableInitRegionFlash: true,
+            enableRegionGuideDots: true,
           }}
           disabled={!isInteractive}
           initialSession={sessionDraft ?? undefined}
@@ -550,7 +696,6 @@ function App(): React.JSX.Element {
           onError={handleError}
         />
 
-        {/* initialization loading mask */}
         {isInitLoading && (
           <View style={styles.initOverlay} pointerEvents="none">
             <ActivityIndicator size="small" color="#4363D8" />
@@ -568,106 +713,40 @@ function App(): React.JSX.Element {
         </View>
       ) : null}
 
-      {/* bottom: business operation bar / Ref method demonstration */}
+      {/* bottom: operation bar */}
       <View style={styles.bottomBar}>
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.bottomBarContent}
-        >
-          {/* preset brush (replace bottom color bar) */}
-          <Text style={styles.sectionLabel}>Preset brush:</Text>
-          {PAINT_PRESETS.map(p => (
-            <TouchableOpacity
-              key={p.label}
-              style={[styles.paintBtn, { backgroundColor: `rgb(${p.color.r},${p.color.g},${p.color.b})` }]}
-              onPress={() => handleSetPaintColor(p.color, p.label)}
-              disabled={!isInteractive}
-            >
-              <Text style={styles.paintBtnText}>{p.label}</Text>
-            </TouchableOpacity>
-          ))}
+        <View style={styles.bottomBarContent}>
+          <DropdownActions
+            label="Preset Brush"
+            items={PAINT_PRESETS.map(p => ({
+              label: p.label,
+              onPress: () => handleSetPaintColor(p.color, p.label),
+              disabled: !isInteractive,
+            }))}
+          />
 
-          <View style={styles.divider} />
+          <DropdownActions
+            label="Operations"
+            items={[
+              { label: 'Undo', onPress: handleReset, disabled: !isInteractive, danger: true },
+              { label: 'Compare', onPress: handleSwap, disabled: !isInteractive },
+              { label: 'Clear', onPress: handleClearAll, disabled: !isInteractive },
+              { label: 'Save', onPress: handleSave, disabled: !isInteractive },
+              { label: 'Export session', onPress: handleExportSession, disabled: !isInteractive },
+            ]}
+          />
 
-          {/* Ref operations */}
-          <Text style={styles.sectionLabel}>Operations:</Text>
-          <TouchableOpacity
-            style={[styles.actionBtn, styles.actionBtnDanger]}
-            onPress={handleReset}
-            disabled={!isInteractive}
-          >
-            <Text style={styles.actionBtnText}>Undo</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={styles.actionBtn}
-            onPress={handleSwap}
-            disabled={!isInteractive}
-          >
-            <Text style={styles.actionBtnText}>Compare</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={styles.actionBtn}
-            onPress={handleClearAll}
-            disabled={!isInteractive}
-          >
-            <Text style={styles.actionBtnText}>Clear</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.actionBtn, styles.actionBtnPrimary]}
-            onPress={handleSave}
-            disabled={!isInteractive}
-          >
-            <Text style={styles.actionBtnTextPrimary}>Save</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={styles.actionBtn}
-            onPress={handleExportSession}
-            disabled={!isInteractive}
-          >
-            <Text style={styles.actionBtnText}>Export session</Text>
-          </TouchableOpacity>
-
-          <View style={styles.divider} />
-
-          {/* Lasso operations */}
-          <Text style={styles.sectionLabel}>Lasso:</Text>
-          <TouchableOpacity
-            style={[styles.actionBtn, isLassoing && styles.actionBtnLassoActive]}
-            onPress={handleStartLasso}
-            disabled={!isInteractive || !manualSplitWalls || isLassoing}
-          >
-            <Text style={styles.actionBtnText}>Start Lasso</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.actionBtn, styles.actionBtnPrimary]}
-            onPress={handleEndLasso}
-            disabled={!isInteractive || !manualSplitWalls || !isLassoing}
-          >
-            <Text style={styles.actionBtnTextPrimary}>End Lasso</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.actionBtn, styles.actionBtnDanger]}
-            onPress={handleCancelLasso}
-            disabled={!isInteractive || !manualSplitWalls || !isLassoing}
-          >
-            <Text style={styles.actionBtnText}>Cancel Lasso</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.actionBtn, styles.actionBtnDanger]}
-            onPress={handleDeleteLasso}
-            disabled={!isInteractive || !manualSplitWalls}
-          >
-            <Text style={styles.actionBtnText}>Del Lasso</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={styles.actionBtn}
-            onPress={handleGetLassoRegions}
-            disabled={!isInteractive || !manualSplitWalls}
-          >
-            <Text style={styles.actionBtnText}>Get Regions</Text>
-          </TouchableOpacity>
-        </ScrollView>
+          <DropdownActions
+            label="Lasso"
+            items={[
+              { label: 'Start Lasso', onPress: handleStartLasso, disabled: !isInteractive || !manualSplitWalls || isLassoing, active: isLassoing },
+              { label: 'End Lasso', onPress: handleEndLasso, disabled: !isInteractive || !manualSplitWalls || !isLassoing },
+              { label: 'Cancel Lasso', onPress: handleCancelLasso, disabled: !isInteractive || !manualSplitWalls || !isLassoing, danger: true },
+              { label: 'Delete Lasso', onPress: handleDeleteLasso, disabled: !isInteractive || !manualSplitWalls, danger: true },
+              { label: 'Get Regions', onPress: handleGetLassoRegions, disabled: !isInteractive || !manualSplitWalls },
+            ]}
+          />
+        </View>
       </View>
 
       {/* error display */}
@@ -715,7 +794,7 @@ const styles = StyleSheet.create({
   topBar: {
     paddingHorizontal: 12,
     paddingTop: 8,
-    paddingBottom: 4,
+    paddingBottom: 8,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: '#e8e8e8',
     backgroundColor: '#fafafa',
@@ -744,36 +823,67 @@ const styles = StyleSheet.create({
     color: '#aaa',
   },
   modeRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
     marginTop: 6,
   },
-  modeRowContent: {
-    alignItems: 'center',
-    gap: 6,
-  },
-  modeChip: {
+
+  // dropdown (shared)
+  dropdownBtn: {
     paddingHorizontal: 10,
-    paddingVertical: 4,
+    paddingVertical: 5,
     borderRadius: 12,
-    backgroundColor: '#eee',
-  },
-  modeChipActive: {
     backgroundColor: '#4363D8',
   },
-  modeChipLassoActive: {
-    backgroundColor: '#00C853',
-  },
-  modeChipText: {
+  dropdownBtnText: {
     fontSize: 11,
-    color: '#666',
-  },
-  modeChipTextActive: {
     color: '#fff',
     fontWeight: '600',
   },
-  modeDivider: {
-    color: '#ddd',
-    fontSize: 11,
-    marginHorizontal: 2,
+  dropdownOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.35)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  dropdownList: {
+    width: 200,
+    maxHeight: 300,
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    overflow: 'hidden',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.15,
+    shadowRadius: 12,
+    elevation: 8,
+  },
+  dropdownItem: {
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: '#f0f0f0',
+  },
+  dropdownItemActive: {
+    backgroundColor: '#eef1ff',
+  },
+  dropdownItemDanger: {
+    backgroundColor: '#fff5f5',
+  },
+  dropdownItemText: {
+    fontSize: 14,
+    color: '#333',
+  },
+  dropdownItemTextActive: {
+    color: '#4363D8',
+    fontWeight: '600',
+  },
+  dropdownItemTextDisabled: {
+    color: '#ccc',
+  },
+  dropdownItemTextDanger: {
+    color: '#c33',
   },
 
   // canvas
@@ -827,66 +937,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: 12,
-    gap: 8,
-  },
-  sectionLabel: {
-    fontSize: 12,
-    color: '#999',
-    fontWeight: '600',
-  },
-  divider: {
-    width: 1,
-    height: 20,
-    backgroundColor: '#e0e0e0',
-    marginHorizontal: 4,
-  },
-
-  // brush button
-  paintBtn: {
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 14,
-    borderWidth: 1.5,
-    borderColor: '#ddd',
-  },
-  paintBtnText: {
-    fontSize: 11,
-    color: '#333',
-    fontWeight: '600',
-    textShadowColor: 'rgba(255,255,255,0.6)',
-    textShadowOffset: { width: 0, height: 1 },
-    textShadowRadius: 2,
-  },
-
-  // operation button
-  actionBtn: {
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 6,
-    backgroundColor: '#f0f0f0',
-    borderWidth: 1,
-    borderColor: '#ddd',
-  },
-  actionBtnPrimary: {
-    backgroundColor: '#4363D8',
-    borderColor: '#4363D8',
-  },
-  actionBtnDanger: {
-    borderColor: '#e88',
-  },
-  actionBtnLassoActive: {
-    backgroundColor: '#FF6B35',
-    borderColor: '#FF6B35',
-  },
-  actionBtnText: {
-    fontSize: 12,
-    color: '#555',
-    fontWeight: '500',
-  },
-  actionBtnTextPrimary: {
-    fontSize: 12,
-    color: '#fff',
-    fontWeight: '600',
+    gap: 10,
   },
 
   // error bar

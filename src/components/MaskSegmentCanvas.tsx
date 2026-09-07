@@ -11,7 +11,7 @@ import {
   View,
   StyleSheet,
 } from 'react-native';
-import { Gesture, GestureDetector } from 'react-native-gesture-handler';
+import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler';
 import {
   runOnJS,
   useSharedValue,
@@ -20,6 +20,7 @@ import {
 import cv from '../utils/opencvAdapter';
 import {
   buildAllRegionOutlinePaths,
+  buildAllRegionGuideCenters,
   buildRegionOutlinePathForRegion,
   downsampleMaskDataForPaths,
   extractRegionsFromMaskBufferSync,
@@ -97,6 +98,7 @@ import {
   Group,
   DashPathEffect,
   Rect,
+  Circle,
   useCanvasRef,
   Skia,
   type SkImage,
@@ -641,15 +643,6 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
     x: number;
     y: number;
   } | null>(null);
-  const [initFlashRegionId, setInitFlashRegionId] = useState<number | null>(null);
-  const initFlashTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const initFlashIndexRef = useRef(0);
-  const initFlashActiveRef = useRef(false);
-  // List of regions still eligible for the init dashed-outline flash (discovery aid).
-  // Computed at the start of the flash loop, excluding any that are already painted.
-  // This ensures that on continue-edit (or any partial seed), already-colored regions
-  // do not get the flashing dashed outline.
-  const initFlashListRef = useRef<SegmentRegion[]>([]);
   // Guard so that initialSession (seed from host bootstrap or scheme) is applied only once
   // after segmentsReady. Prevents later prop identity changes (e.g. caused by host slot/brush
   // selection re-renders) from calling restoreSession again, which would clobber live
@@ -919,31 +912,61 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
     setCanvasInteractive(true);
   }, [emitWatch, emitLayersReadyIfReady]);
 
-  const paintColorMapSkImg = useMemo(() => {
+  // Build the feathered paint color map off the tap critical path.
+  // Sync useMemo previously blocked the whole commit (guide-dot removal + paint)
+  // on a full-res boxBlur; deferring lets the tap frame land first.
+  const [paintColorMapSkImg, setPaintColorMapSkImg] = useState<SkImage | null>(
+    null,
+  );
+  const paintColorMapBuildIdRef = useRef(0);
+  const runtimeRevision = getMaskRuntimeRevision();
+
+  useEffect(() => {
     const pick = regionPickRef.current;
-    paintColorMapSkImgRef.current?.dispose();
-    // Early out: no pick buffer yet, or no regions have been painted (initial load or fresh session).
-    // Avoids repeated full-resolution RGBA allocation + boxBlur (for maskFeather) + Skia.Image.MakeImage
-    // on every re-render during the hot init path. When initialSession restores paints, paintedRegions
-    // will update and legitimately trigger a single build of the (feathered) color map.
+    const buildId = ++paintColorMapBuildIdRef.current;
+
     if (!pick || paintedRegions.size === 0) {
+      paintColorMapSkImgRef.current?.dispose();
       paintColorMapSkImgRef.current = null;
-      return null;
+      setPaintColorMapSkImg(null);
+      return;
     }
-    const map = createPaintColorMapForPaint(
-      pick.buffer,
-      pick.cols,
-      pick.rows,
-      paintedRegions,
-    );
-    paintColorMapSkImgRef.current = map;
-    return map;
+
+    const paintedSnapshot = paintedRegions;
+    let rafOuter = 0;
+    let rafInner = 0;
+    rafOuter = requestAnimationFrame(() => {
+      // Second frame: ensure the tap commit (guide dots hide) has painted.
+      rafInner = requestAnimationFrame(() => {
+        if (buildId !== paintColorMapBuildIdRef.current) {
+          return;
+        }
+        const map = createPaintColorMapForPaint(
+          pick.buffer,
+          pick.cols,
+          pick.rows,
+          paintedSnapshot,
+        );
+        if (buildId !== paintColorMapBuildIdRef.current) {
+          map.dispose();
+          return;
+        }
+        paintColorMapSkImgRef.current?.dispose();
+        paintColorMapSkImgRef.current = map;
+        setPaintColorMapSkImg(map);
+      });
+    });
+
+    return () => {
+      cancelAnimationFrame(rafOuter);
+      cancelAnimationFrame(rafInner);
+    };
   }, [
     paintedRegions,
     paintResourcesReady,
     segmentsReady,
     regionPickGeneration,
-    getMaskRuntimeRevision(),
+    runtimeRevision,
   ]);
 
   const paintedRegionConfigRef = useRef(
@@ -981,14 +1004,6 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
       setPaintHistory([]);
       setHeldRegionId(null);
       setHeldRegionAnchor(null);
-      setInitFlashRegionId(null);
-      initFlashActiveRef.current = false;
-      initFlashIndexRef.current = 0;
-      initFlashListRef.current = [];
-      if (initFlashTimerRef.current) {
-        clearTimeout(initFlashTimerRef.current);
-        initFlashTimerRef.current = null;
-      }
       hasAppliedInitialSessionRef.current = false;
       // Reset lasso state on new segmentation
       setIsLassoActive(false);
@@ -1014,6 +1029,7 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
       workBufferRef.current = null;
       paintLayersPromiseRef.current = null;
       setRegionOutlinePaths(new Map());
+      setRegionGuideCenters(new Map());
       setMaskPathsReady(false);
       setPaintResourcesReady(false);
       baseboardPickMaskRef.current = null;
@@ -1186,6 +1202,7 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
         const pathMapRect = getContainRect(canvasWRef.current, canvasHRef.current, imgW, imgH);
         maskPathsContainRectRef.current = pathMapRect;
         setRegionOutlinePaths(new Map());
+        setRegionGuideCenters(new Map());
         setMaskPathsReady(false);
         setRegionPalette(finalRegions);
         setRegionCount(finalRegions.length);
@@ -1209,10 +1226,16 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
             pathMaskData,
             pathMapRect,
           );
+          const guideCenters = buildAllRegionGuideCenters(
+            finalRegions,
+            pathMaskData,
+            pathMapRect,
+          );
           if (runId !== segmentRunIdRef.current) {
             return;
           }
           setRegionOutlinePaths(outlines);
+          setRegionGuideCenters(guideCenters);
           setMaskPathsReady(true);
           maskPathsReadyRef.current = true;
           emitMaskPathsReadyIfReady();
@@ -1383,18 +1406,8 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
       }
       paintColorMapSkImgRef.current?.dispose();
       paintColorMapSkImgRef.current = null;
+      setPaintColorMapSkImg(null);
       regionsRef.current = [];
-      // Also reset any pending init flash state (the full reset will also run at start of
-      // the next segmentAndPrepareLayers, but this keeps things clean if the effect
-      // re-triggers segmentation while a flash sequence was in flight).
-      initFlashListRef.current = [];
-      initFlashActiveRef.current = false;
-      initFlashIndexRef.current = 0;
-      if (initFlashTimerRef.current) {
-        clearTimeout(initFlashTimerRef.current);
-        initFlashTimerRef.current = null;
-      }
-      setInitFlashRegionId(null);
     };
   }, [originImgPath, maskImgPath, resetZoom]);
 
@@ -1506,105 +1519,10 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
   }, [initialSession, segmentsReady, restoreSession]);
 
   useEffect(() => {
-    return () => {
-      if (initFlashTimerRef.current) {
-        clearTimeout(initFlashTimerRef.current);
-      }
-    };
-  }, []);
-
-  const stopInitRegionFlash = useCallback(() => {
-    initFlashActiveRef.current = false;
-    if (initFlashTimerRef.current) {
-      clearTimeout(initFlashTimerRef.current);
-      initFlashTimerRef.current = null;
-    }
-    setInitFlashRegionId(null);
-  }, []);
-
-  const startInitRegionFlashLoop = useCallback(() => {
-    const ir = getMaskSegmentRuntimeConfig().interaction;
-    if (!ir.enableInitRegionFlash) {
-      return;
-    }
-    if (initFlashActiveRef.current) {
-      return;
-    }
-    const allRegions = regionsRef.current;
-    if (allRegions.length === 0) {
-      return;
-    }
-
-    // Filter out painted regions and tiny regions (noise / thin strips
-    // that produce negligible overlays). Threshold: 0.2% of total image area.
-    const imgSize = imageSizeRef2.current;
-    const minFlashArea = imgSize
-      ? Math.max(500, imgSize.w * imgSize.h * 0.002)
-      : 500;
-    initFlashListRef.current = allRegions.filter(
-      (r) =>
-        !paintedRegionsRef.current.has(r.id) && r.area >= minFlashArea,
-    );
-    initFlashActiveRef.current = true;
-    initFlashIndexRef.current = 0;
-
-    const showNext = () => {
-      if (!initFlashActiveRef.current || initFlashListRef.current.length === 0) {
-        return;
-      }
-      const list = initFlashListRef.current;
-      const idx = initFlashIndexRef.current;
-      if (idx >= list.length) {
-        // One full pass of dashed outline flashes (one per *unpainted* region) is enough.
-        // Stop automatically; onUserInteraction can stop early.
-        stopInitRegionFlash();
-        return;
-      }
-      setInitFlashRegionId(list[idx].id);
-      initFlashIndexRef.current += 1;
-      initFlashTimerRef.current = setTimeout(
-        showNext,
-        ir.initRegionFlashMs,
-      );
-    };
-
-    showNext();
-  }, []);
-
-  const onUserInteraction = useCallback(() => {
-    stopInitRegionFlash();
-  }, [stopInitRegionFlash]);
-
-  // Once any region has been painted, stop the entire discovery flash immediately.
-  // No individual pruning — it's all or nothing: either 0 painted → cycle through
-  // all regions, or ≥1 painted → stop flashing entirely.
-  useEffect(() => {
-    if (!initFlashActiveRef.current) return;
-    if (paintedRegionsRef.current.size > 0) {
-      stopInitRegionFlash();
-    }
-  }, [paintedRegions, stopInitRegionFlash]);
-
-  useEffect(() => {
-    if (segmentsReady && maskPathsReady && containRect && regionCount > 0 && canvasInteractive) {
-      if (!initFlashActiveRef.current) {
-        startInitRegionFlashLoop();
-      }
-      return;
-    }
     if (!segmentsReady) {
-      stopInitRegionFlash();
       setCanvasInteractive(false);
     }
-  }, [
-    segmentsReady,
-    maskPathsReady,
-    containRect,
-    regionCount,
-    canvasInteractive,
-    startInitRegionFlashLoop,
-    stopInitRegionFlash,
-  ]);
+  }, [segmentsReady]);
 
   const getActiveBrushColor = useCallback((): BgrColor | null => {
     if (customPaintColor) {
@@ -1617,6 +1535,9 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
   }, [customPaintColor, activeBrushIndex, paintPalette]);
 
   const hasActiveBrush = customPaintColor != null || activeBrushIndex != null;
+
+  // Kept as a stable hook for tap/gesture call sites (previously stopped init flash).
+  const onUserInteraction = useCallback(() => {}, []);
 
   const applyPaintToRegion = useCallback(
     (targetRegionId: number, color: BgrColor) => {
@@ -2444,15 +2365,11 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
           wallSemanticIdx,
         };
 
-        // Keep paint preview in sync with the rebuilt pick buffer (same pick used by shader).
-        if (keptPainted.size > 0) {
+        // Keep paint preview in sync via paintColorMap effect (regionPickGeneration bump below).
+        if (keptPainted.size === 0) {
           paintColorMapSkImgRef.current?.dispose();
-          paintColorMapSkImgRef.current = createPaintColorMapForPaint(
-            newPickBuffer,
-            segW,
-            segH,
-            keptPainted,
-          );
+          paintColorMapSkImgRef.current = null;
+          setPaintColorMapSkImg(null);
         }
 
         // 10. Build ManualWallPartition results (append to previous sessions)
@@ -2627,11 +2544,15 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
   const [regionOutlinePaths, setRegionOutlinePaths] = useState<
     Map<number, SkPath>
   >(new Map());
+  const [regionGuideCenters, setRegionGuideCenters] = useState<
+    Map<number, { x: number; y: number }>
+  >(new Map());
 
   useEffect(() => {
     if (!segmentsReady || !containRect || regionPalette.length === 0) {
       if (!segmentsReady) {
         setRegionOutlinePaths(new Map());
+        setRegionGuideCenters(new Map());
         setMaskPathsReady(false);
         maskPathsContainRectRef.current = null;
       }
@@ -2641,6 +2562,7 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
     const maskData = regionMaskDataRef.current;
     if (!maskData) {
       setRegionOutlinePaths(new Map());
+      setRegionGuideCenters(new Map());
       setMaskPathsReady(false);
       return;
     }
@@ -2666,10 +2588,16 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
       pathMaskData,
       containRect,
     );
-    
+    const guideCenters = buildAllRegionGuideCenters(
+      regionPalette,
+      pathMaskData,
+      containRect,
+    );
+
     maskPathsContainRectRef.current = containRect;
     lastOutlineRegionKeyRef.current = regionLayoutKey;
     setRegionOutlinePaths(outlines);
+    setRegionGuideCenters(guideCenters);
     setMaskPathsReady(true);
     maskPathsReadyRef.current = true;
     emitMaskPathsReadyIfReady();
@@ -2768,6 +2696,9 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
       return null;
     }
     const showOverlay = !compareMode && segmentsReady;
+    const showGuideDots =
+      showOverlay &&
+      getMaskSegmentRuntimeConfig().interaction.enableRegionGuideDots;
     const shaderReady =
       paintColorMapSkImg &&
       lowFreqSkImg &&
@@ -2813,9 +2744,41 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
               renderImageLayer(displayImg)
             )}
 
-            {showOverlay &&
-              initFlashRegionId != null &&
-              renderRegionMaskOverlay(initFlashRegionId, 'init-overlay')}
+            {showGuideDots &&
+              (() => {
+                const imgSize = imageSize;
+                const minArea = imgSize
+                  ? Math.max(500, imgSize.w * imgSize.h * 0.002)
+                  : 500;
+                const dots: React.ReactNode[] = [];
+                for (const reg of regionPalette) {
+                  if (paintedRegions.has(reg.id) || reg.area < minArea) {
+                    continue;
+                  }
+                  const center = regionGuideCenters.get(reg.id);
+                  if (!center) continue;
+                  // Guide mark: translucent black disc + white core (half of 24×24 SVG).
+                  dots.push(
+                    <Circle
+                      key={`guide-dot-outer-${reg.id}`}
+                      cx={center.x}
+                      cy={center.y}
+                      r={6}
+                      color="rgba(0, 0, 0, 0.4)"
+                    />,
+                  );
+                  dots.push(
+                    <Circle
+                      key={`guide-dot-inner-${reg.id}`}
+                      cx={center.x}
+                      cy={center.y}
+                      r={3}
+                      color="white"
+                    />,
+                  );
+                }
+                return dots;
+              })()}
 
             {showOverlay &&
               heldRegionId != null &&
@@ -3012,7 +2975,7 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
   };
 
   // Full-bleed (0,0 to work size) composition for the high-res export snapshot canvas.
-  // No UI overlays (dashes, held, flash). When painted + shader ready we use the exact
+  // No UI overlays (hold outline, guide dots). When painted + shader ready we use the exact
   // same PaintShaderLayer the user sees in the editor, so makeImageSnapshot() gives
   const renderFullResPainted = () => {
     const sz = exportCanvasSize;
@@ -3671,7 +3634,7 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
 
 
   return (
-    <View style={[styles.container, style]}>
+    <GestureHandlerRootView style={[styles.container, style]}>
       <View
         style={styles.canvasWrap}
         onLayout={(e) => {
@@ -3717,7 +3680,7 @@ const MaskSegmentCanvas = forwardRef<MaskSegmentCanvasRef, MaskSegmentCanvasProp
           </Canvas>
         </View>
       ) : null}
-    </View>
+    </GestureHandlerRootView>
   );
 });
 

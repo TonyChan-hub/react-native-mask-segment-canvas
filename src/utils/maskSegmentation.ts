@@ -77,10 +77,18 @@ export function buildRegionOutlinePolygons(reg: SegmentRegion): NormPoint[][] {
   return [bboxToPolygon(reg.bbox)];
 }
 
-import { buildAllRegionOutlinePaths, buildRegionOutlinePathForRegion } from './maskOutlinePaths';
+import {
+  buildAllRegionOutlinePaths,
+  buildAllRegionGuideCenters,
+  buildRegionOutlinePathForRegion,
+} from './maskOutlinePaths';
 
 // Re-export for backward compatibility
-export { buildAllRegionOutlinePaths, buildRegionOutlinePathForRegion };
+export {
+  buildAllRegionOutlinePaths,
+  buildAllRegionGuideCenters,
+  buildRegionOutlinePathForRegion,
+};
 
 function isBaseboardEntry(entry: PaletteEntry): boolean {
   return entry.name === BASEBOARD_SEMANTIC_NAME;

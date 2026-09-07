@@ -55,8 +55,8 @@ export type SegmentRegion = {
     thinStrip?: boolean;
 };
 export declare function buildRegionOutlinePolygons(reg: SegmentRegion): NormPoint[][];
-import { buildAllRegionOutlinePaths, buildRegionOutlinePathForRegion } from './maskOutlinePaths';
-export { buildAllRegionOutlinePaths, buildRegionOutlinePathForRegion };
+import { buildAllRegionOutlinePaths, buildAllRegionGuideCenters, buildRegionOutlinePathForRegion } from './maskOutlinePaths';
+export { buildAllRegionOutlinePaths, buildAllRegionGuideCenters, buildRegionOutlinePathForRegion, };
 /** build mask from binary mask row by row (for Skia PathBuilder) */
 export declare function appendMaskBinaryToPathBuilder(binary: Uint8Array, cols: number, rows: number, rect: {
     x: number;

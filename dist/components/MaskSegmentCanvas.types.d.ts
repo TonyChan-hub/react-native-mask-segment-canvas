@@ -100,7 +100,11 @@ export type InteractionConfig = {
     pickMapSearchRadiusPx?: number;
     thinStripPadding?: number;
     regionPadding?: number;
+    /** Show a semi-transparent guide dot near the center of each unpainted region. */
+    enableRegionGuideDots?: boolean;
+    /** @deprecated Init dashed flash carousel removed; ignored. */
     initRegionFlashMs?: number;
+    /** @deprecated Use enableRegionGuideDots. */
     enableInitRegionFlash?: boolean;
 };
 export type PaintedRegionRecord = {
