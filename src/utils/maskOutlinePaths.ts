@@ -544,13 +544,82 @@ export function buildAllRegionOutlinePaths(
       continue;
     }
     // No seed — build outlines from the full binary so all disconnected
-    // fragments (common after mask downsampling) get dashed outlines during
-    // the init flash loop. Per-region hold highlights still use a touch-seed
-    // via buildRegionOutlinePathForRegion for precise fragment isolation.
+    // fragments (common after mask downsampling) get dashed outlines for
+    // hold highlights. Per-region hold still uses a touch-seed via
+    // buildRegionOutlinePathForRegion for precise fragment isolation.
     map.set(
       reg.id,
       buildRegionOutlinePathFromBinary(binary, cols, rows, rect),
     );
+  }
+  return map;
+}
+
+/** If (x,y) is outside the mask, BFS to the nearest in-mask pixel. */
+function nearestMaskPixel(
+  binary: Uint8Array,
+  cols: number,
+  rows: number,
+  startX: number,
+  startY: number,
+): { x: number; y: number } | null {
+  const sx = Math.min(cols - 1, Math.max(0, startX));
+  const sy = Math.min(rows - 1, Math.max(0, startY));
+  if (binary[sy * cols + sx]) {
+    return { x: sx, y: sy };
+  }
+
+  const visited = new Uint8Array(cols * rows);
+  const queue = [sy * cols + sx];
+  visited[sy * cols + sx] = 1;
+  let qi = 0;
+
+  while (qi < queue.length) {
+    const index = queue[qi++];
+    const px = index % cols;
+    const py = (index - px) / cols;
+    const neighbors = [index - 1, index + 1, index - cols, index + cols];
+    for (let n = 0; n < 4; n++) {
+      const ni = neighbors[n];
+      if (ni < 0 || ni >= cols * rows) continue;
+      const nx = ni % cols;
+      const ny = (ni - nx) / cols;
+      // Reject wrap-around from ±1 on row edges
+      if (Math.abs(nx - px) + Math.abs(ny - py) !== 1) continue;
+      if (visited[ni]) continue;
+      if (binary[ni]) {
+        return { x: nx, y: ny };
+      }
+      visited[ni] = 1;
+      queue.push(ni);
+    }
+  }
+  return null;
+}
+
+/**
+ * Canvas-space guide-dot centers for each region: largest-component mass
+ * centroid, snapped onto the mask so concave shapes still get an in-region point.
+ */
+export function buildAllRegionGuideCenters(
+  regions: SegmentRegion[],
+  maskData: RegionMaskData,
+  rect: { x: number; y: number; w: number; h: number },
+): Map<number, { x: number; y: number }> {
+  const { cols, rows } = maskData;
+  const binaries = extractRegionBinaries(regions, maskData);
+  const map = new Map<number, { x: number; y: number }>();
+
+  for (const reg of regions) {
+    const binary = binaries.get(reg.id);
+    if (!binary) continue;
+    const seed = findLargestComponentSeed(binary, cols, rows);
+    if (!seed) continue;
+    const snapped = nearestMaskPixel(binary, cols, rows, seed.x, seed.y) ?? seed;
+    map.set(reg.id, {
+      x: rect.x + ((snapped.x + 0.5) / cols) * rect.w,
+      y: rect.y + ((snapped.y + 0.5) / rows) * rect.h,
+    });
   }
   return map;
 }

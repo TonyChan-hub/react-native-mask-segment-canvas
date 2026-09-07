@@ -104,7 +104,7 @@ function App(): React.JSX.Element {
             {watchState ? (
               <Text style={styles.watchText}>
                 Status: {formatWatchStatus(watchState)}
-                {isFullyReady ? ' · Carousel dashed line ready' : null}
+                {isFullyReady ? ' · Guide dots ready' : null}
               </Text>
             ) : null}
             <View style={styles.canvasHost}>
